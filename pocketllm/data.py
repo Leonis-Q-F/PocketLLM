@@ -1,150 +1,237 @@
-"""数据集与文本格式化。"""
-
-from __future__ import annotations
-
-from dataclasses import dataclass
-
-import torch
-from datasets import load_dataset
+from modelscope.models.multi_modal.videocomposer.ops.degration import add_speckle_noise
 from torch.utils.data import Dataset
+import torch
+import json
+import os
+import random
+from datasets import load_dataset, Features, Sequence, Value
 
 
-ROLE_PREFIX = {
-    "system": "<system>\n",
-    "user": "<user>\n",
-    "assistant": "<assistant>\n",
-}
+def pre_processing_chat(conversations, add_system_ratio=0.2):
+    if any(conv.get('tools') for conv in conversations): return conversations
 
+    SYSTEM_PROMPTS = [
+        "你是一个知识丰富的AI，尽力为用户提供准确的信息。",
+        "你是PocketLLM，一个小巧但有用的语言模型。",
+        "你是一个专业的AI助手，请提供有价值的回答。",
+        "你是PocketLLM，请尽力帮助用户解决问题。",
+        "你是一个可靠的AI，请给出准确的回答。",
+        "You are a helpful AI assistant.",
+        "You are PocketLLM, a lightweight intelligent assistant.",
+        "You are a friendly chatbot. Please answer the user's questions carefully.",
+        "You are a knowledgeable AI. Try your best to provide accurate information.",
+        "You are PocketLLM, a small but useful language model."
+    ]
+    # 概率性添加system
+    if conversations[0].get('role') != 'system':
+        if random.random() < add_system_ratio:
+            return [{'role': 'system', 'content': random.choice(SYSTEM_PROMPTS)}] + conversations
+    return conversations
 
-@dataclass
-class PromptSample:
-    prompt: str
-    answer: str | None = None
-
-
-def _normalize_messages(sample: dict) -> list[dict[str, str]]:
-    if "messages" in sample:
-        return sample["messages"]
-    if "conversations" in sample:
-        return sample["conversations"]
-    if "prompt" in sample and "response" in sample:
-        return [
-            {"role": "user", "content": sample["prompt"]},
-            {"role": "assistant", "content": sample["response"]},
-        ]
-    if "instruction" in sample and "output" in sample:
-        instruction = str(sample["instruction"])
-        extra_input = str(sample.get("input", "")).strip()
-        if extra_input:
-            instruction = f"{instruction}\n{extra_input}"
-        return [
-            {"role": "user", "content": instruction},
-            {"role": "assistant", "content": sample["output"]},
-        ]
-    raise KeyError("样本缺少可识别字段，需包含 messages/conversations/prompt-response/instruction-output。")
-
-
-def render_messages(messages: list[dict[str, str]], add_generation_prompt: bool = False) -> str:
-    chunks: list[str] = []
-    for message in messages:
-        role = message["role"].strip().lower()
-        content = str(message.get("content", "")).strip()
-        if not content:
-            continue
-        prefix = ROLE_PREFIX.get(role, f"<{role}>\n")
-        chunks.append(prefix)
-        chunks.append(content)
-        chunks.append("\n")
-    if add_generation_prompt:
-        chunks.append(ROLE_PREFIX["assistant"])
-    return "".join(chunks)
-
+def post_processing_chat(prompt_content, empty_think_ratio=0.2):
+    # 以80%概率移除空思考标签
+    if '<think>\n\n</think>\n\n' in prompt_content and random.random() > empty_think_ratio:
+        prompt_content = prompt_content.replace('<think>\n\n</think>\n\n', '')
+    return prompt_content
 
 class PretrainDataset(Dataset):
-    def __init__(self, data_path: str, tokenizer, max_length: int) -> None:
+    def __init__(self, data_path, tokenizer, max_len=512):
+        super().__init__()
         self.tokenizer = tokenizer
-        self.max_length = max_length
-        self.samples = load_dataset("json", data_files=data_path, split="train")
+        self.max_length = max_len
+        self.samples = load_dataset('json', data_files=data_path, split='train')
 
-    def __len__(self) -> int:
+    def __len__(self):
         return len(self.samples)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        text = str(self.samples[idx]["text"])
-        token_ids = self.tokenizer(
-            text,
+    def __getitem__(self, index):
+        sample = self.samples[index]
+        tokens = self.tokenizer(
+            str(sample['text']),
             add_special_tokens=False,
             truncation=True,
-            max_length=self.max_length - 2,
-        ).input_ids
-        token_ids = [self.tokenizer.bos_token_id] + token_ids + [self.tokenizer.eos_token_id]
-        padding = [self.tokenizer.pad_token_id] * (self.max_length - len(token_ids))
-        input_ids = torch.tensor(token_ids + padding, dtype=torch.long)
-        labels = input_ids.clone()
-        labels[input_ids == self.tokenizer.pad_token_id] = -100
+            max_length=self.max_length - 2, # -2 for [CLS] and [SEP]
+        )
+        tokens = [self.tokenizer.bos_token_id] + tokens + [self.tokenizer.eos_token_id]  # 手动添加开始与结束符号
+        input_ids = tokens + [self.tokenizer.pad_token_id] * (self.max_length - len(tokens)) # 填充
+        input_ids = torch.tensor(input_ids, dtype=torch.long) # 转换成张量
+        labels = input_ids.clone() # 通过clone保持与原序列的一致
+        labels[input_ids == self.tokenizer.pad_token_id] = -100 # 将填充位置的标签设为-100
         return input_ids, labels
 
+    class SFTDataset(Dataset):
+        '''
+        原始数据格式：
+        {
+          "conversations": [
+            {"role": "user", "content": "..."},
+            {"role": "assistant", "content": "..."}
+          ]
+        }
+        '''
+        def __init__(self, jsonl_path, tokenizer, max_length=1024):
+            super().__init__()
+            self.tokenizer = tokenizer
+            self.max_length = max_length
+            features = Features({'conversations': [
+                {'role': Value('string'), 'content': Value('string'), 'reasoning_content': Value('string'),
+                 'tools': Value('string'), 'tool_calls': Value('string')}]})  # 定义特征
+            self.samples = load_dataset('json', data_files=jsonl_path, split='train', features=features) # 加载json数据集
+            self.bos_id = tokenizer(f'{tokenizer.bos_token}assistant\n', add_special_tokens=False).input_ids # 自定义的开始符号
+            self.eos_id = tokenizer(f'{tokenizer.eos_token}\n', add_special_tokens=False).input_ids # 自定义的结束符号
 
-class SFTDataset(Dataset):
-    def __init__(self, data_path: str, tokenizer, max_length: int) -> None:
+        def __len__(self):
+            return len(self.samples)
+
+        def create_chat_prompt(self, conversations):
+            """
+            把结构化对话，转成模型实际训练时看到的文本prompt,
+            类似于：
+                "<bos>user\n你好\n<eos>\n<bos>assistant\n你好，有什么可以帮你？<eos>\n"
+            """
+            messages = []
+            tools = None
+            for message in conversations:
+                message = dict(message)
+                if message.get("role") == "system" and message.get("tools"):
+                    tools = json.loads(message["tools"]) if isinstance(message["tools"], str) else message["tools"]
+                if message.get("tool_calls") and isinstance(message["tool_calls"], str):
+                    message["tool_calls"] = json.loads(message["tool_calls"])
+                messages.append(message)
+            return self.tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=False,
+                tools=tools
+            )
+
+        def generate_labels(self, input_ids):
+            labels = [-100] * len(input_ids) # 统一设置为-100
+            i = 0
+            while i < len(input_ids):
+                if input_ids[i:i + len(self.bos_id)] == self.bos_id: # 找到开始符号
+                    start = i + len(self.bos_id)
+                    end = start
+                    while end < len(input_ids): # 找到结束符号
+                        if input_ids[end:end + len(self.eos_id)] == self.eos_id:
+                            break
+                        end += 1
+                    for j in range(start, min(end + len(self.eos_id), self.max_length)): # 将中间的文本标记为标签
+                        labels[j] = input_ids[j]
+                    i = end + len(self.eos_id) if end < len(input_ids) else len(input_ids) # 跳转到下一个开始符号
+                else:
+                    i += 1
+            return labels
+
+        def __getitem__(self, index):
+            sample = self.samples[index]
+            conversations = pre_processing_chat(sample['conversations'])
+            prompt = self.create_chat_prompt(conversations)
+            prompt = post_processing_chat(prompt)
+            input_ids = self.tokenizer(prompt).input_ids[:self.max_length]
+            input_ids += [self.tokenizer.pad_token_id] * (self.max_length - len(input_ids))
+            labels = self.generate_labels(input_ids)
+            return torch.tensor(input_ids, dtype=torch.long), torch.tensor(labels, dtype=torch.long)
+
+class DPODataset(Dataset):
+    def __init__(self, file_path, tokenizer, max_length=4096):
+        super().__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
-        self.samples = load_dataset("json", data_files=data_path, split="train")
+        self.padding = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else 0
+        self.bos_id = tokenizer(f'{tokenizer.bos_token}assistant\n', add_special_tokens=False).input_ids
+        self.eos_id = tokenizer(f'{tokenizer.eos_token}\n', add_special_tokens=False).input_ids
+        self.samples = load_dataset('json', data_files=file_path, split='train')
 
-    def __len__(self) -> int:
+    def __len__(self):
         return len(self.samples)
 
-    def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        messages = _normalize_messages(self.samples[idx])
-        input_ids = [self.tokenizer.bos_token_id]
-        labels = [-100]
-        for message in messages:
-            role = message["role"].strip().lower()
-            content = str(message.get("content", "")).strip()
-            prefix_ids = self.tokenizer(
-                ROLE_PREFIX.get(role, f"<{role}>\n"),
-                add_special_tokens=False,
-            ).input_ids
-            content_ids = self.tokenizer(content + "\n", add_special_tokens=False).input_ids
-            eos_ids = [self.tokenizer.eos_token_id] if role == "assistant" else []
-            input_ids.extend(prefix_ids + content_ids + eos_ids)
-            if role == "assistant":
-                labels.extend([-100] * len(prefix_ids))
-                labels.extend(content_ids + eos_ids)
+    def __getitem__(self, index):
+        sample = self.samples[index]
+        chosen = sample['chosen']  # 是一个 list，里面包含若干 {role, content}
+        rejected = sample['rejected']  # 同上
+        chosen_prompt = self.tokenizer.apply_chat_template(
+            chosen, tokenize=False, add_generation_prompt=False
+        )
+        chosen_prompt = post_processing_chat(chosen_prompt) # 构建chosen prompt
+
+        rejected_prompt = self.tokenizer.apply_chat_template(
+            rejected, tokenize=False, add_generation_prompt=False
+        )
+        rejected_prompt = post_processing_chat(rejected_prompt) # 构建chosen prompt
+        chosen_encoding = self.tokenizer(
+            chosen_prompt, truncation=True, max_length=self.max_length, padding='max_length'
+        ) # 进行tokenize
+        rejected_encoding = self.tokenizer(
+            rejected_prompt, truncation=True, max_length=self.max_length, padding='max_length'
+        )
+
+        chosen_input_ids = chosen_encoding['input_ids']
+        chosen_loss_mask = self.generate_loss_mask(chosen_input_ids) # 生成loss mask，只让assistant参与训练
+
+        rejected_input_ids = rejected_encoding['input_ids']
+        rejected_loss_mask = self.generate_loss_mask(rejected_input_ids) # 同上
+        x_chosen = torch.tensor(chosen_input_ids[:-1], dtype=torch.long)
+        y_chosen = torch.tensor(chosen_input_ids[1:], dtype=torch.long)
+        mask_chosen = torch.tensor(chosen_loss_mask[1:], dtype=torch.long)
+        x_rejected = torch.tensor(rejected_input_ids[:-1], dtype=torch.long)
+        y_rejected = torch.tensor(rejected_input_ids[1:], dtype=torch.long)
+        mask_rejected = torch.tensor(rejected_loss_mask[1:], dtype=torch.long)
+
+        return {
+            'x_chosen': x_chosen,
+            'y_chosen': y_chosen,
+            'mask_chosen': mask_chosen,
+            'x_rejected': x_rejected,
+            'y_rejected': y_rejected,
+            'mask_rejected': mask_rejected
+        }
+
+    def generate_loss_mask(self, input_ids):
+        loss_mask = [0] * len(input_ids)
+        i = 0
+        while i < len(input_ids):
+            if input_ids[i:i + len(self.bos_id)] == self.bos_id:
+                start = i + len(self.bos_id)
+                end = start
+                while end < len(input_ids):
+                    if input_ids[end:end + len(self.eos_id)] == self.eos_id:
+                        break
+                    end += 1
+                for j in range(start, min(end + len(self.eos_id), self.max_length)):
+                    loss_mask[j] = 1
+                i = end + len(self.eos_id) if end < len(input_ids) else len(input_ids)
             else:
-                labels.extend([-100] * (len(prefix_ids) + len(content_ids) + len(eos_ids)))
+                i += 1
+        return loss_mask
 
-        input_ids = input_ids[: self.max_length]
-        labels = labels[: self.max_length]
-        pad_len = self.max_length - len(input_ids)
-        input_ids.extend([self.tokenizer.pad_token_id] * pad_len)
-        labels.extend([-100] * pad_len)
-        return torch.tensor(input_ids, dtype=torch.long), torch.tensor(labels, dtype=torch.long)
+class RLAIFDataset(Dataset):
+    def __init__(self, jsonl_path, tokenizer, max_length=1024, thinking_ratio=0.5):
+        super().__init__()
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.thinking_ratio = thinking_ratio  # 按概率开启 thinking
+        self.samples = load_dataset('json', data_files=jsonl_path, split='train')
+        self.bos_id = tokenizer(f'{tokenizer.bos_token}assistant', add_special_tokens=False).input_ids
+        self.eos_id = tokenizer(f'{tokenizer.eos_token}', add_special_tokens=False).input_ids
 
-
-class PreferencePromptDataset(Dataset):
-    def __init__(self, data_path: str) -> None:
-        self.samples = load_dataset("json", data_files=data_path, split="train")
-
-    def __len__(self) -> int:
+    def __len__(self):
         return len(self.samples)
 
-    def __getitem__(self, idx: int) -> PromptSample:
-        sample = self.samples[idx]
-        if "prompt" in sample:
-            answer = sample.get("answer")
-            return PromptSample(prompt=str(sample["prompt"]), answer=None if answer is None else str(answer))
-        messages = _normalize_messages(sample)
-        answer = None
-        if messages and messages[-1]["role"].strip().lower() == "assistant":
-            answer = str(messages[-1]["content"])
-            messages = messages[:-1]
-        prompt = render_messages(messages, add_generation_prompt=True)
-        return PromptSample(prompt=prompt, answer=answer)
+    def create_chat_prompt(self, conversations):
+        conversations = pre_processing_chat(conversations)
+        use_thinking = random.random() < self.thinking_ratio
+        return self.tokenizer.apply_chat_template(
+            conversations[:-1],
+            tokenize=False,
+            open_thinking=use_thinking,
+            add_generation_prompt=True
+        )
+    def __getitem__(self, index):
+        sample = self.samples[index]
+        prompt = self.create_chat_prompt(sample['conversations'])
 
-
-def preference_collate_fn(batch: list[PromptSample]) -> dict[str, list[str | None]]:
-    return {
-        "prompts": [sample.prompt for sample in batch],
-        "answers": [sample.answer for sample in batch],
-    }
+        return {
+            'prompt': prompt,
+            'answer': ""
+        }
