@@ -78,8 +78,11 @@ def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
     k_embed = ((k * cos.unsqueeze(unsqueeze_dim)) + (rotate_half(k) * sin.unsqueeze(unsqueeze_dim))).to(k.dtype)
     return q_embed, k_embed
 
-# 适配 GQA（分组查询注意力）
+# 适配 GQA（分组查询注意力）  
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
+    """
+        KV 头重复函数，将 KV 头的数量扩展到与 Query 头数量一致
+    """
     bs, slen, num_key_value_heads, head_dim = x.shape
     if n_rep == 1: return x
     return (x[:, :, :, None, :].expand(bs, slen, num_key_value_heads, n_rep, head_dim).reshape(bs, slen, num_key_value_heads * n_rep, head_dim))
@@ -107,6 +110,7 @@ class Attention(nn.Module):
     def forward(self, x, position_embeddings, past_key_value=None, use_cache=False, attention_mask=None):
         bsz, seq_len, _ = x.shape  # 批量大小，序列长度，嵌入维度
         xq, xk, xv = self.q_proj(x), self.k_proj(x), self.v_proj(x)  # 计算Q、K、V
+
         xq = xq.view(bsz, seq_len, self.n_local_heads, self.head_dim)  # 拆成多个注意力头
         xk = xk.view(bsz, seq_len, self.n_local_kv_heads, self.head_dim)
         xv = xv.view(bsz, seq_len, self.n_local_kv_heads, self.head_dim)
@@ -115,25 +119,30 @@ class Attention(nn.Module):
         cos, sin = position_embeddings  # 获取旋转位置嵌入
         xq, xk = apply_rotary_pos_emb(xq, xk, cos, sin)  # 应用旋转位置嵌入
 
-        if past_key_value is not None:  # 如果提供了 past_key_value，则将其与当前计算的 KV 拼接起来，以支持自回归推理中的缓存机制
-            xk = torch.cat([past_key_value[0], xk], dim=1)  # 将past_key_value中的KV拼接到当前KV中
+        if past_key_value is not None:  # 如果提供了有历史KV，则将其与当前计算的 KV 拼接起来
+            xk = torch.cat([past_key_value[0], xk], dim=1)
             xv = torch.cat([past_key_value[1], xv], dim=1)
         past_kv = (xk, xv) if use_cache else None  # 将past_key_value中的KV拼接到当前KV中
         xq, xk, xv = (xq.transpose(1, 2), repeat_kv(xk, self.n_rep).transpose(1, 2),
                       repeat_kv(xv, self.n_rep).transpose(1, 2))  # 调整维度以适配注意力计算，重复KV以匹配Query头数量（GQA）
+
         if self.flash and (seq_len > 1) and (not self.is_causal or past_key_value is None) and (attention_mask is None or torch.all(attention_mask == 1)):
             # 使用 PyTorch 的 Flash Attention 计算注意力输出，自动处理因果掩码和 dropout
             output = F.scaled_dot_product_attention(xq, xk, xv, dropout_p=self.dropout if self.training else 0.0, is_causal=self.is_causal)
         else:
+            # 公式：(Q * K ^ T) / sqrt(d_k)
             scores = (xq @ xk.transpose(-2, -1)) / math.sqrt(self.head_dim)  # 计算注意力分数，缩放因子为头维度的平方根
-            if self.is_causal: scores[:, :, :, -seq_len:] += torch.full((seq_len, seq_len), float("-inf"), device=scores.device).triu(1) # 添加因果掩码，确保每个位置只能关注之前的位置
-            if attention_mask is not None: scores += (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * -1e9 # 添加注意力掩码，将被掩盖的位置的分数设置为一个非常大的负数，确保 softmax 后概率接近于0
+            if self.is_causal: scores[:, :, :, -seq_len:] += torch.full((seq_len, seq_len), float("-inf"), device=scores.device).triu(1) # 添加因果掩码 防止偷看未来
+            if attention_mask is not None: scores += (1.0 - attention_mask.unsqueeze(1).unsqueeze(2)) * -1e9 # 添加注意力掩码 让模型不关注无用的padding
             output = self.attn_dropout(F.softmax(scores.float(), dim=-1).type_as(xq)) @ xv # 计算注意力权重并应用于V，得到注意力输出
+
         output = output.transpose(1, 2).reshape(bsz, seq_len, -1) # 将多头注意力输出重新组合成原始的嵌入维度
         output = self.resid_dropout(self.o_proj(output)) # 最后通过输出投影层，并应用残差连接前的 dropout
         return output, past_kv
 
+# 普通的前馈层实现，包含一个门控机制（Gated Linear Unit）和两个线性变换，激活函数可配置
 class FeedForward(nn.Module):
+# 公式：FFN(x) = W_down * (act(W_gate * x) ⊙ W_up * x)，其中 ⊙ 表示逐元素乘法，W_gate、W_up 和 W_down 分别是三个线性变换矩阵，act 是激活函数
     def __init__(self, config: PocketLLMConfig, intermediate_size: int = None):
         super().__init__()
         intermediate_size = intermediate_size or config.intermediate_size 
@@ -158,11 +167,15 @@ class MOEFeedForward(nn.Module):
     def forward(self, x):
         batch_size, seq_len, hidden_dim = x.shape
         x_flat = x.view(-1, hidden_dim) # 将输入展平为 (batch_size * seq_len, hidden_dim)，以便对每个 token 进行独立的专家路由和计算
-        scores = F.softmax(self.gate(x_flat), dim=-1) # 计算每个 token 路由到各个专家的概率分布，得到 (batch_size * seq_len, num_experts) 的分数矩阵
+        scores = F.softmax(self.gate(x_flat), dim=-1) # 计算每个 token 路由到各个专家的概率分布，得到 (batch_size * seq_len, num_experts) 的分数矩阵 “路由器”
         topk_weight, topk_idx = torch.topk(scores, k=self.config.num_experts_per_tok, dim=-1, sorted=False) # 对每个 token 选择 top-k 个专家，得到对应的权重和索引，形状为 (batch_size * seq_len, num_experts_per_tok)
+
+        # 可选地对 top-k 权重进行重新归一化，使其和为 1，增加数值稳定性
         if self.config.norm_topk_prob: topk_weight = topk_weight / (topk_weight.sum(dim=-1, keepdim=True) + 1e-20) 
-        y = torch.zeros_like(x_flat) 
-        for i, expert in enumerate(self.experts): # 遍历每个专家，检查哪些 token 被路由到该专家，并将其计算结果加权累加到输出 y 中
+        y = torch.zeros_like(x_flat)
+
+        # 遍历每个专家，检查哪些 token 被路由到该专家，并将其计算结果加权累加到输出 y 中
+        for i, expert in enumerate(self.experts):
             mask = (topk_idx == i)
             if mask.any():
                 token_idx = mask.any(dim=-1).nonzero().flatten()
@@ -170,11 +183,14 @@ class MOEFeedForward(nn.Module):
                 y.index_add_(0, token_idx, (expert(x_flat[token_idx]) * weight).to(y.dtype))
             elif self.training:
                 y[0, 0] += 0 * sum(p.sum() for p in expert.parameters())
+
+        # 计算路由均衡的辅助损失，鼓励模型在专家之间分配负载，防止某些专家过载而其他专家闲置
         if self.training and self.config.router_aux_loss_coef > 0:
             load = F.one_hot(topk_idx, self.config.num_experts).float().mean(0)
             self.aux_loss = (load * scores.mean(0)).sum() * self.config.num_experts * self.config.router_aux_loss_coef
         else:
             self.aux_loss = scores.new_zeros(1).squeeze()
+
         return y.view(batch_size, seq_len, hidden_dim)
 
 # Transformer Block
@@ -188,12 +204,13 @@ class PocketLLMBlock(nn.Module):
 
     def forward(self, hidden_states, position_embeddings, past_key_value=None, use_cache=False, attention_mask=None):
         residual = hidden_states
+        # 执行自注意力计算，输入经过 LayerNorm 归一化，并传入位置嵌入、历史 KV 和注意力掩码等信息，得到新的隐藏状态和当前的 KV 用于缓存
         hidden_states, present_key_value = self.self_attn(
             self.input_layernorm(hidden_states), position_embeddings,
             past_key_value, use_cache, attention_mask
         )
-        hidden_states += residual
-        hidden_states = hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
+        hidden_states += residual # 添加残差连接，将注意力输出与输入相加
+        hidden_states = hidden_states + self.mlp(self.post_attention_layernorm(hidden_states)) # 经过另一个 LayerNorm 归一化后，输入前馈层计算，并添加残差连接
         return hidden_states, present_key_value
 
 
@@ -214,11 +231,12 @@ class PocketLLMModel(nn.Module):
     def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False, **kwargs):
         batch_size, seq_length = input_ids.shape
         if hasattr(past_key_values, 'layers'): past_key_values = None
-        past_key_values = past_key_values or [None] * len(self.layers)
-        start_pos = past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0
-        hidden_states = self.dropout(self.embed_tokens(input_ids))
-        position_embeddings = (self.freqs_cos[start_pos:start_pos + seq_length], self.freqs_sin[start_pos:start_pos + seq_length])
-        presents = []
+        past_key_values = past_key_values or [None] * len(self.layers) # 初始化 past_key_values 为 None，用于存储历史 KV
+        start_pos = past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0 # 计算起始位置，即历史 KV 中最后一个 token 的位置
+        hidden_states = self.dropout(self.embed_tokens(input_ids)) # 输入经过嵌入层，得到隐藏状态
+        position_embeddings = (self.freqs_cos[start_pos:start_pos + seq_length], self.freqs_sin[start_pos:start_pos + seq_length]) # 获取位置嵌入，用于计算 Rope
+        presents = [] # 初始化 presents 列表，用于存储每个 layer 的当前 KV
+        # 遍历每个 layer，执行自注意力计算和前馈计算，并添加残差连接
         for layer, past_key_value in zip(self.layers, past_key_values):
             hidden_states, present = layer(
                 hidden_states,
@@ -228,9 +246,9 @@ class PocketLLMModel(nn.Module):
                 attention_mask=attention_mask
             )
             presents.append(present)
-        hidden_states = self.norm(hidden_states)
-        aux_loss = sum([l.mlp.aux_loss for l in self.layers if isinstance(l.mlp, MOEFeedForward)], hidden_states.new_zeros(1).squeeze())
-        return hidden_states, presents, aux_loss
+        hidden_states = self.norm(hidden_states) # 添加 LayerNorm 归一化
+        aux_loss = sum([l.mlp.aux_loss for l in self.layers if isinstance(l.mlp, MOEFeedForward)], hidden_states.new_zeros(1).squeeze()) # 计算 MoE 的辅助损失
+        return hidden_states, presents, aux_loss # 返回隐藏状态、当前 KV 和 MoE 的辅助损失
 
 
 class PocketLLMForCausalLM(nn.Module):
