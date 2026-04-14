@@ -15,7 +15,7 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 from model.model_pocketllm import PocketLLMConfig
 from dataset.dataloader import PretrainDataset
-from trainer.trainer_utils import get_lr, Logger, is_main_process, lm_checkpoint, setup_seed, init_model, SkipBatchSampler
+from trainer.trainer_utils import get_lr, Logger, lm_checkpoint, setup_seed, init_model, SkipBatchSampler
 
 warnings.filterwarnings('ignore')
 
@@ -23,7 +23,7 @@ warnings.filterwarnings('ignore')
 def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
     start_time = time.time()
     last_step = start_step
-    for step,(inputs, labels) in enumerate(loader, start = start_step + 1):
+    for step,(input_ids, labels) in enumerate(loader, start = start_step + 1):
         # 数据搬到设备上
         input_ids = input_ids.to(args.device)
         labels = labels.to(args.device)
@@ -64,7 +64,7 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
             if wandb: wandb.log({"loss": current_loss, "logits_loss": current_logits_loss, "aux_loss": current_aux_loss, "learning_rate": current_lr, "epoch_time": eta_min})
         
         # 模型保存
-        if (step % args.save_interval == 0 or step == iters) and is_main_process():
+        if step % args.save_interval == 0 or step == iters:
             model.eval() # 切换到评估模式，关闭dropout等
             moe_suffix = '_moe' if lm_config.use_moe else ''
             ckp = f'{args.save_dir}/{args.save_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
@@ -130,7 +130,7 @@ if __name__ == "__main__":
     # ========== 3. 设置混合精度 ==========
     device_type = "cuda" if "cuda" in args.device else "cpu"
     dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
-    autocast_ctx = nullcontext() if device_type == "cpu" else torch.cuda.amp.autocast(dtype=dtype)
+    autocast_ctx = nullcontext() if device_type == "cpu" else torch.amp.autocast(device_type, dtype=dtype)
     
     # ========== 4. 配wandb ==========
     wandb = None
@@ -150,7 +150,7 @@ if __name__ == "__main__":
     # ========== 5. 定义模型、数据、优化器 ==========
     model, tokenizer = init_model(lm_config, args.from_weight, device=args.device)
     train_ds = PretrainDataset(args.data_path, tokenizer, max_length=args.max_seq_len)
-    scaler = torch.cuda.amp.GradScaler(enabled=(args.dtype == 'float16'))
+    scaler = torch.amp.GradScaler(device_type, enabled=(args.dtype == 'float16'))
     optimizer = optim.AdamW(model.parameters(), lr=args.learning_rate)
 
     # ========== 6. 从ckp恢复状态 ==========

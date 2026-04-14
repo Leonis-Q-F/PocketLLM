@@ -1,4 +1,3 @@
-from modelscope.models.multi_modal.videocomposer.ops.degration import add_speckle_noise
 from torch.utils.data import Dataset
 import torch
 import json
@@ -50,8 +49,8 @@ class PretrainDataset(Dataset):
             str(sample['text']),
             add_special_tokens=False,
             truncation=True,
-            max_length=self.max_length - 2, # -2 for [CLS] and [SEP]
-        )
+            max_length=self.max_length - 2, # -2 for bos and eos
+        ).input_ids
         tokens = [self.tokenizer.bos_token_id] + tokens + [self.tokenizer.eos_token_id]  # 手动添加开始与结束符号
         input_ids = tokens + [self.tokenizer.pad_token_id] * (self.max_length - len(tokens)) # 填充
         input_ids = torch.tensor(input_ids, dtype=torch.long) # 转换成张量
@@ -59,79 +58,79 @@ class PretrainDataset(Dataset):
         labels[input_ids == self.tokenizer.pad_token_id] = -100 # 将填充位置的标签设为-100
         return input_ids, labels
 
-    class SFTDataset(Dataset):
-        '''
-        原始数据格式：
-        {
-          "conversations": [
-            {"role": "user", "content": "..."},
-            {"role": "assistant", "content": "..."}
-          ]
-        }
-        '''
-        def __init__(self, jsonl_path, tokenizer, max_length=1024):
-            super().__init__()
-            self.tokenizer = tokenizer
-            self.max_length = max_length
-            features = Features({'conversations': [
-                {'role': Value('string'), 'content': Value('string'), 'reasoning_content': Value('string'),
-                 'tools': Value('string'), 'tool_calls': Value('string')}]})  # 定义特征
-            self.samples = load_dataset('json', data_files=jsonl_path, split='train', features=features) # 加载json数据集
-            self.bos_id = tokenizer(f'{tokenizer.bos_token}assistant\n', add_special_tokens=False).input_ids # 自定义的开始符号
-            self.eos_id = tokenizer(f'{tokenizer.eos_token}\n', add_special_tokens=False).input_ids # 自定义的结束符号
+class SFTDataset(Dataset):
+    '''
+    原始数据格式：
+    {
+        "conversations": [
+        {"role": "user", "content": "..."},
+        {"role": "assistant", "content": "..."}
+        ]
+    }
+    '''
+    def __init__(self, jsonl_path, tokenizer, max_length=1024):
+        super().__init__()
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        features = Features({'conversations': [
+            {'role': Value('string'), 'content': Value('string'), 'reasoning_content': Value('string'),
+                'tools': Value('string'), 'tool_calls': Value('string')}]})  # 定义特征
+        self.samples = load_dataset('json', data_files=jsonl_path, split='train', features=features) # 加载json数据集
+        self.bos_id = tokenizer(f'{tokenizer.bos_token}assistant\n', add_special_tokens=False).input_ids # 自定义的开始符号
+        self.eos_id = tokenizer(f'{tokenizer.eos_token}\n', add_special_tokens=False).input_ids # 自定义的结束符号
 
-        def __len__(self):
-            return len(self.samples)
+    def __len__(self):
+        return len(self.samples)
 
-        def create_chat_prompt(self, conversations):
-            """
-            把结构化对话，转成模型实际训练时看到的文本prompt,
-            类似于：
-                "<bos>user\n你好\n<eos>\n<bos>assistant\n你好，有什么可以帮你？<eos>\n"
-            """
-            messages = []
-            tools = None
-            for message in conversations:
-                message = dict(message)
-                if message.get("role") == "system" and message.get("tools"):
-                    tools = json.loads(message["tools"]) if isinstance(message["tools"], str) else message["tools"]
-                if message.get("tool_calls") and isinstance(message["tool_calls"], str):
-                    message["tool_calls"] = json.loads(message["tool_calls"])
-                messages.append(message)
-            return self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=False,
-                tools=tools
-            )
+    def create_chat_prompt(self, conversations):
+        """
+        把结构化对话，转成模型实际训练时看到的文本prompt,
+        类似于：
+            "<bos>user\n你好\n<eos>\n<bos>assistant\n你好，有什么可以帮你？<eos>\n"
+        """
+        messages = []
+        tools = None
+        for message in conversations:
+            message = dict(message)
+            if message.get("role") == "system" and message.get("tools"):
+                tools = json.loads(message["tools"]) if isinstance(message["tools"], str) else message["tools"]
+            if message.get("tool_calls") and isinstance(message["tool_calls"], str):
+                message["tool_calls"] = json.loads(message["tool_calls"])
+            messages.append(message)
+        return self.tokenizer.apply_chat_template(
+            messages,
+            tokenize=False,
+            add_generation_prompt=False,
+            tools=tools
+        )
 
-        def generate_labels(self, input_ids):
-            labels = [-100] * len(input_ids) # 统一设置为-100
-            i = 0
-            while i < len(input_ids):
-                if input_ids[i:i + len(self.bos_id)] == self.bos_id: # 找到开始符号
-                    start = i + len(self.bos_id)
-                    end = start
-                    while end < len(input_ids): # 找到结束符号
-                        if input_ids[end:end + len(self.eos_id)] == self.eos_id:
-                            break
-                        end += 1
-                    for j in range(start, min(end + len(self.eos_id), self.max_length)): # 将中间的文本标记为标签
-                        labels[j] = input_ids[j]
-                    i = end + len(self.eos_id) if end < len(input_ids) else len(input_ids) # 跳转到下一个开始符号
-                else:
-                    i += 1
-            return labels
+    def generate_labels(self, input_ids):
+        labels = [-100] * len(input_ids) # 统一设置为-100
+        i = 0
+        while i < len(input_ids):
+            if input_ids[i:i + len(self.bos_id)] == self.bos_id: # 找到开始符号
+                start = i + len(self.bos_id)
+                end = start
+                while end < len(input_ids): # 找到结束符号
+                    if input_ids[end:end + len(self.eos_id)] == self.eos_id:
+                        break
+                    end += 1
+                for j in range(start, min(end + len(self.eos_id), self.max_length)): # 将中间的文本标记为标签
+                    labels[j] = input_ids[j]
+                i = end + len(self.eos_id) if end < len(input_ids) else len(input_ids) # 跳转到下一个开始符号
+            else:
+                i += 1
+        return labels
 
-        def __getitem__(self, index):
-            sample = self.samples[index]
-            conversations = pre_processing_chat(sample['conversations'])
-            prompt = self.create_chat_prompt(conversations)
-            prompt = post_processing_chat(prompt)
-            input_ids = self.tokenizer(prompt).input_ids[:self.max_length]
-            input_ids += [self.tokenizer.pad_token_id] * (self.max_length - len(input_ids))
-            labels = self.generate_labels(input_ids)
-            return torch.tensor(input_ids, dtype=torch.long), torch.tensor(labels, dtype=torch.long)
+    def __getitem__(self, index):
+        sample = self.samples[index]
+        conversations = pre_processing_chat(sample['conversations'])
+        prompt = self.create_chat_prompt(conversations)
+        prompt = post_processing_chat(prompt)
+        input_ids = self.tokenizer(prompt).input_ids[:self.max_length]
+        input_ids += [self.tokenizer.pad_token_id] * (self.max_length - len(input_ids))
+        labels = self.generate_labels(input_ids)
+        return torch.tensor(input_ids, dtype=torch.long), torch.tensor(labels, dtype=torch.long)
 
 class DPODataset(Dataset):
     def __init__(self, file_path, tokenizer, max_length=4096):
