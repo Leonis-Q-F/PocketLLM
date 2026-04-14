@@ -114,10 +114,9 @@ if __name__ == "__main__":
     parser.add_argument("--use_compile", default=0, type=int, choices=[0, 1], help="是否使用torch.compile加速（0=否，1=是）")
     args = parser.parse_args()
         
-        # ========== 1. 初始化环境和随机种子 ==========
+    # ========== 1. 初始化环境和随机种子 ==========
     args.device = "cuda" if torch.cuda.is_available() else "cpu"
     setup_seed(42)
-    local_rank = 0
     
     # ========== 2. 配置目录、模型参数、检查ckp ==========
     os.makedirs(args.save_dir, exist_ok=True)
