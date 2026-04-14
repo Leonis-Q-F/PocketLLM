@@ -305,10 +305,16 @@ class PocketLLMForCausalLM(PreTrainedModel, GenerationMixin):
 
 
 if __name__ == "__main__":
-    config = PocketLLMConfig()
-    model = PocketLLMModel(config)
-    input_ids = torch.randint(0, config.vocab_size, (2, 16))  # batch_size=2, seq_length=16
-    attention_mask = torch.ones_like(input_ids)  # 全部位置都有效
-    hidden_states, presents, aux_loss = model(input_ids, attention_mask=attention_mask)
-    print("Hidden states shape:", hidden_states.shape)  # 应该是 (2, 16, hidden_size)
-    print("Auxiliary loss:", aux_loss.item())
+    # 使用cuda
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # 创建模型配置
+    config = PocketLLMConfig(hidden_size=512, num_hidden_layers=4, use_moe=True, num_experts=2, num_experts_per_tok=1)
+    # 初始化模型并移动到设备
+    model = PocketLLMForCausalLM(config).to(device)
+    # 创建输入数据
+    input_ids = torch.tensor([[1, 5, 10, 20], [1, 15, 25, 35]], device=device)  # 示例输入，batch_size=2, seq_length=4
+    attention_mask = torch.tensor([[1, 1, 1, 1], [1, 1, 1, 1]], device=device)  # 示例注意力掩码，表示所有位置都有效
+    # 前向传播
+    outputs = model(input_ids, attention_mask)
+    print("Logits shape:", outputs.logits.shape)  # 输出 logits 的形状
+    print("Auxiliary loss:", outputs.aux_loss)  # 输出 MoE 的辅助损失
