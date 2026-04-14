@@ -35,10 +35,10 @@ def post_processing_chat(prompt_content, empty_think_ratio=0.2):
     return prompt_content
 
 class PretrainDataset(Dataset):
-    def __init__(self, data_path, tokenizer, max_len=512):
+    def __init__(self, data_path, tokenizer, max_length=512):
         super().__init__()
         self.tokenizer = tokenizer
-        self.max_length = max_len
+        self.max_length = max_length
         self.samples = load_dataset('json', data_files=data_path, split='train')
 
     def __len__(self):
