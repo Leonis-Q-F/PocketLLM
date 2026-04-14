@@ -1,163 +1,195 @@
 # PocketLLM
 
-单卡 `RTX 4070Ti` 取向的轻量级大模型全链路训练与对齐框架。
+PocketLLM 是一个面向单卡实验的轻量级大语言模型训练仓库，目标是在尽量少的工程噪音下，把模型主干、数据适配层和训练入口组织成一条可读、可维护、可扩展的链路。
 
-项目目标不是“套壳调库”，而是沿着一条足够短、足够清晰的路径，把下面这条链路真正打通：
+当前仓库的第一优先级是提供一个可理解、可裁剪的预训练基线。模型主干、LoRA 工具和多种数据集适配器已经在仓库中，但正式训练入口目前只覆盖预训练阶段，`SFT / LoRA / GRPO` 的官方训练脚本仍待补齐。
 
-`Pretrain -> SFT / LoRA -> GRPO`
+## 当前状态
 
-当前仓库以 [minimind](https://github.com/jingyaogong/minimind) 为原型做了重新裁剪，但策略不是照搬：
+- 当前状态：活跃原型
+- 已提供：模型定义、LoRA 工具、数据集适配器、单卡预训练入口
+- 尚未提供：官方 `SFT` 训练入口、官方 `GRPO` 训练入口、评测脚本、推理命令行工具、持续集成流程
+- 适合场景：本地实验、代码阅读、最小可复现训练链路
+- 不适合场景：生产训练平台、多人协作的大规模训练工程、公开基准提交
 
-- 保留它“核心代码自己写”的精神。
-- 缩小第一阶段实现面，先让主干正确，再逐步长出 tokenizer、数据清洗、评测与更强 reward。
-- 面向单卡资源，把模型、脚本、数据接口都做成可裁剪的形态。
+## 主要特性
 
-## 现在有什么
+- 仅解码器因果语言模型
+- GQA 注意力、RoPE、RMSNorm、SwiGLU
+- 可选 MoE 前馈层与路由辅助损失
+- 本地 tokenizer 资源，位于 `model/`
+- `Pretrain / SFT / DPO / RLAIF` 数据适配器
+- LoRA 注入、保存、加载与合并工具
+- 预训练阶段的检查点保存与续训能力
+- 面向单卡的训练流程
 
-- `pocketllm/model.py`
-  - Decoder-only 主干
-  - GQA 风格 attention
-  - RoPE
-  - RMSNorm
-  - SwiGLU FFN
-  - 可选 MoE + load balance auxiliary loss
-- `pocketllm/lora.py`
-  - LoRA 线性层替换
-  - 冻结非 LoRA 参数
-  - 导出 LoRA adapter
-- `pocketllm/data.py`
-  - 预训练数据集
-  - SFT 数据集
-  - GRPO prompt 数据集
-- `train_pretrain.py`
-  - 最小预训练入口
-- `train_sft.py`
-  - 全参数 SFT 或 LoRA SFT
-- `train_grpo.py`
-  - 教学版 GRPO 闭环
+## 仓库结构
 
-## 推荐学习顺序
-
-1. 先读 `pocketllm/model.py`
-   - 理解一层 Block 里 attention / FFN / residual 的骨架。
-2. 再跑 `train_pretrain.py`
-   - 先用很小的数据和 `dense-44m` 预设做 smoke test。
-3. 然后看 `train_sft.py`
-   - 对比全参数 SFT 和 LoRA SFT 的训练参数量差异。
-4. 最后看 `train_grpo.py`
-   - 先理解 rollout、reward、reference model、advantage、KL penalty 各自的职责。
-
-## 单卡 4070Ti 的建议路线
-
-- 第一阶段：`dense-44m`
-  - 目标是把训练链路跑通。
-- 第二阶段：`dense-110m`
-  - 目标是观察预训练和 SFT 后的能力变化。
-- 第三阶段：`moe-200m`
-  - 目标是体验“总参数更大，但单 token 激活更少”的 MoE 路线。
-
-不要一上来就冲 0.2B。先跑通，再扩张。好系统不是堆参数堆出来的，是靠边界干净长出来的。
-
-## 数据格式
-
-### 1. 预训练
-
-jsonl 每行至少包含：
-
-```json
-{"text": "这是一个预训练样本。"}
+```text
+PocketLLM
+├── README.md
+├── CLAUDE.md
+├── requirements.txt
+├── dataset
+│   ├── dataloader.py
+│   └── data
+│       ├── README.md
+│       ├── pretrain_t2t_mini.jsonl
+│       ├── pretrain_t2t.jsonl
+│       ├── sft_t2t_mini.jsonl
+│       ├── sft_t2t.jsonl
+│       ├── dpo.jsonl
+│       ├── rlaif.jsonl
+│       └── ...
+├── model
+│   ├── model_pocketllm.py
+│   ├── model_lora.py
+│   ├── tokenizer.json
+│   ├── tokenizer_config.json
+│   └── __init__.py
+└── trainer
+    ├── train_pre.py
+    └── trainer_utils.py
 ```
 
-### 2. SFT
+## 环境要求
 
-支持以下任一种：
+- Python 3.10 及以上
+- 推荐使用支持 CUDA 的显卡，当前主要目标环境为单卡 `RTX 4070 Ti`
+- PyTorch 2.2 及以上
+- Windows 和 Linux 均可，但当前路径示例优先按照本仓库现状编写
 
-```json
-{"messages": [{"role": "user", "content": "你好"}, {"role": "assistant", "content": "你好，我是 PocketLLM。"}]}
-```
-
-```json
-{"prompt": "解释一下 Transformer。", "response": "Transformer 是一种以注意力机制为核心的序列建模架构。"}
-```
-
-```json
-{"instruction": "用一句话解释 LoRA", "output": "LoRA 用低秩增量矩阵在极少参数上完成微调。"}
-```
-
-### 3. GRPO
-
-最简单格式：
-
-```json
-{"prompt": "2 + 2 = ?", "answer": "4"}
-```
-
-也支持消息格式，若最后一条是 `assistant`，它会被视为参考答案，其前文会被视为 prompt。
-
-## 快速开始
-
-### 1. 安装依赖
+## 安装方式
 
 ```bash
+python -m venv .venv
+```
+
+```bash
+# Windows
+.venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 2. 预训练
-
 ```bash
-python train_pretrain.py \
-  --tokenizer-path Qwen/Qwen2.5-0.5B \
-  --data-path data/pretrain.jsonl \
-  --preset dense-44m \
-  --output-dir out/pretrain_smoke
+# Linux / macOS
+source .venv/bin/activate
+pip install -r requirements.txt
 ```
 
-### 3. LoRA SFT
+## 数据目录
 
-```bash
-python train_sft.py \
-  --tokenizer-path Qwen/Qwen2.5-0.5B \
-  --data-path data/sft.jsonl \
-  --preset dense-44m \
-  --init-checkpoint out/pretrain_smoke/final.pt \
-  --output-dir out/sft_lora \
-  --lora-rank 16
+训练数据默认放在 `dataset/data/` 下，当前仓库已经包含本地数据文件。
+
+- `pretrain_t2t_mini.jsonl`：预训练冒烟测试首选
+- `pretrain_t2t.jsonl`：更大的预训练语料
+- `sft_t2t_mini.jsonl` / `sft_t2t.jsonl`：供未来监督微调阶段使用
+- `dpo.jsonl`：偏好学习数据
+- `rlaif.jsonl`：强化学习阶段的 prompt 数据
+- `agent_rl*.jsonl`：预留给后续 agentic RL 实验
+
+更详细的数据字段说明见 [dataset/data/README.md](dataset/data/README.md)。
+
+## 数据格式
+
+### 预训练
+
+```jsonl
+{"text": "这是一个预训练样本。"}
 ```
 
-### 4. GRPO
+### 监督微调
 
-```bash
-python train_grpo.py \
-  --tokenizer-path Qwen/Qwen2.5-0.5B \
-  --data-path data/grpo.jsonl \
-  --preset dense-44m \
-  --policy-checkpoint out/sft_lora/final.pt \
-  --output-dir out/grpo
+```jsonl
+{
+  "conversations": [
+    {"role": "user", "content": "你好"},
+    {"role": "assistant", "content": "你好，我是 PocketLLM。"}
+  ]
+}
 ```
 
-## 和简历项目的关系
+### 偏好学习
 
-这个仓库当前是“第一版骨架”，它已经把简历项目的核心脊柱搭好了：
+```jsonl
+{
+  "chosen": [
+    {"role": "user", "content": "Q"},
+    {"role": "assistant", "content": "good answer"}
+  ],
+  "rejected": [
+    {"role": "user", "content": "Q"},
+    {"role": "assistant", "content": "bad answer"}
+  ]
+}
+```
 
-- 从 0 写 Decoder-only 主干
-- 支持可选 MoE
-- 支持 Pretrain / SFT / LoRA / GRPO
-- 支持 reward 设计继续向 RLHF / RLAIF 扩展
+### 强化学习
 
-但还没有一次性把所有东西都塞满。后续最值得继续补的部分是：
+`RLAIFDataset` 当前按多轮对话提示词读取样本，通常要求最后一条 `assistant` 留空或可被视为采样位置。
 
-- tokenizer 训练与特殊 token 设计
-- MNBVC / COIG 风格的数据清洗脚本
-- C-Eval / CMMLU 评测脚本
-- 更强的 reward model 接口
-- checkpoint 导出与推理脚本
+## 快速开始
+
+当前预训练脚本对若干路径使用了相对当前工作目录的默认值，因此推荐从 `trainer/` 目录启动。
+
+```bash
+cd trainer
+python train_pre.py \
+  --data_path ../dataset/data/pretrain_t2t_mini.jsonl \
+  --save_dir ../out \
+  --save_weight pretrain_smoke \
+  --hidden_size 512 \
+  --num_hidden_layers 4 \
+  --max_seq_len 256 \
+  --batch_size 4 \
+  --accumulation_steps 4
+```
+
+如果要继续训练同一组权重，可以在同一工作目录下启用恢复模式：
+
+```bash
+cd trainer
+python train_pre.py \
+  --data_path ../dataset/data/pretrain_t2t_mini.jsonl \
+  --save_dir ../out \
+  --save_weight pretrain_smoke \
+  --from_resume 1
+```
+
+## 训练说明
+
+- 当前唯一官方训练入口是 [trainer/train_pre.py](trainer/train_pre.py)。
+- `trainer_utils.init_model()` 默认从 `../model` 读取 tokenizer，因此文档中的命令统一假设从 `trainer/` 目录执行。
+- `--use_wandb` 实际接入的是 `swanlab`，相关依赖已写入 `requirements.txt`。
+- `SFT / LoRA / GRPO` 虽然已经有模型工具和数据适配层，但尚未提供正式训练命令行入口，因此本文档不再把它们描述为“已经可运行”的链路。
 
 ## 设计原则
 
-- 先消灭不必要的特殊情况，再谈复杂技巧。
-- 先让链路闭环，再做性能优化。
-- 先做单卡能学明白的版本，再做更大的工程化版本。
+- 先保证链路真实存在，再写文档，不预支未来功能。
+- 优先把单卡路径打通，再考虑更复杂的工程抽象。
+- 文档、依赖和脚本应在同一个提交中保持一致。
+- 对人可见的说明文本优先使用中文；变量名、函数名、模块名保持英文。
 
-如果一句话概括这个仓库的哲学：
+## 路线图
 
-“让数据顺着主干流，让复杂度死在边界上。”
+1. 补齐官方 `SFT` 训练入口。
+2. 提供面向 `LoRA` 的独立训练命令行工具。
+3. 补齐 `GRPO / RLAIF` 训练入口。
+4. 增加评测与推理脚本。
+5. 增加最小冒烟测试与持续集成流程。
+
+## 贡献方式
+
+- 欢迎提交问题、文档修订、训练脚本修复和最小可验证的功能补丁。
+- 新增运行依赖时，请同步更新 `requirements.txt`。
+- 修改路径约定、训练入口或目录结构时，请同步更新 `README.md` 和 `CLAUDE.md`。
+- 请避免在文档中承诺仓库尚未交付的功能。
+
+## 致谢
+
+- 设计与数据组织参考了 [minimind](https://github.com/jingyaogong/minimind)。
+- `dataset/data/` 中的数据说明和元数据文件保留了上游数据分发痕迹，二次分发前请自行核查来源与许可。
+
+## 许可说明
+
+仓库当前没有单独的 `LICENSE` 文件。若要作为公开开源仓库长期维护，建议在对外分发前补齐明确许可协议。
