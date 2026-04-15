@@ -11,11 +11,10 @@ import warnings
 import torch
 from contextlib import nullcontext
 from torch import optim
-from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 from model.model_pocketllm import PocketLLMConfig
 from dataset.dataloader import PretrainDataset
-from trainer.trainer_utils import get_lr, Logger, lm_checkpoint, setup_seed, init_model, SkipBatchSampler
+from trainer.trainer_utils import get_lr, Logger, lm_checkpoint, setup_seed, init_model, SkipBatchSampler, save_checkpoint
 
 warnings.filterwarnings('ignore')
 
@@ -64,18 +63,9 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
             if wandb: wandb.log({"loss": current_loss, "logits_loss": current_logits_loss, "aux_loss": current_aux_loss, "learning_rate": current_lr, "epoch_time": eta_min})
         
         # 模型保存
-        if step % args.save_interval == 0 or step == iters:
-            model.eval() # 切换到评估模式，关闭dropout等
-            moe_suffix = '_moe' if lm_config.use_moe else ''
-            ckp = f'{args.save_dir}/{args.save_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
-            raw_model = model.module if isinstance(model, DistributedDataParallel) else model # 获取原始模型，去掉DDP包装
-            raw_model = getattr(raw_model, '_orig_mod', raw_model) # 获取原始模型,因为有些时候模型会被包装，真正的原始模型可能在 _orig_mod 里面。
-            state_dict = raw_model.state_dict() # 获取模型权重
-            torch.save({k: v.half().cpu() for k, v in state_dict.items()}, ckp) # 保存为半精度，节省空间
-            # 保存检查点
-            lm_checkpoint(lm_config, weight=args.save_weight, model=model, optimizer=optimizer, scaler=scaler, epoch=epoch, step=step, wandb=wandb, save_dir='../checkpoints')
-            model.train()
-            del state_dict
+        if step % args.save_interval == 0 and step != iters:
+            save_checkpoint(lm_config, args.save_weight, model, optimizer, scaler, epoch, step,
+                            wandb=wandb, save_dir=args.save_dir, checkpoint_dir='../checkpoints')
 
         del input_ids, labels, res, loss 
 
@@ -86,6 +76,9 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
+    if last_step > start_step:
+        save_checkpoint(lm_config, args.save_weight, model, optimizer, scaler, epoch, last_step,
+                        wandb=wandb, save_dir=args.save_dir, checkpoint_dir='../checkpoints')
 
 
 if __name__ == "__main__":
@@ -95,7 +88,7 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=2, help="训练轮数")
     parser.add_argument("--batch_size", type=int, default=32, help="batch size")
     parser.add_argument("--learning_rate", type=float, default=5e-4, help="初始学习率")
-    parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu", help="训练设备")
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="训练设备")
     parser.add_argument("--dtype", type=str, default="bfloat16", help="混合精度类型")
     parser.add_argument("--num_workers", type=int, default=8, help="数据加载线程数")
     parser.add_argument("--accumulation_steps", type=int, default=8, help="梯度累积步数")
@@ -115,8 +108,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
         
     # ========== 1. 初始化环境和随机种子 ==========
-    args.device = "cuda" if torch.cuda.is_available() else "cpu"
+    if args.device.startswith("cuda") and not torch.cuda.is_available():
+        Logger("CUDA 不可用，已回退到 CPU")
+        args.device = "cpu"
     setup_seed(42)
+    os.makedirs(args.save_dir, exist_ok=True)
     
     # ========== 2. 配置目录、模型参数、检查ckp ==========
     os.makedirs(args.save_dir, exist_ok=True)

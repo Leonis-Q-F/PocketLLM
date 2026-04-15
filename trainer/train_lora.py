@@ -16,20 +16,11 @@ from torch.utils.data import DataLoader
 from dataset.dataloader import SFTDataset
 from model.model_lora import apply_lora, save_lora
 from model.model_pocketllm import PocketLLMConfig
-from trainer.trainer_utils import Logger, SkipBatchSampler, get_lr, init_model, lm_checkpoint, setup_seed
+from trainer.trainer_utils import Logger, SkipBatchSampler, get_lr, init_model, lm_checkpoint, save_checkpoint, setup_seed
 
 warnings.filterwarnings("ignore")
 
 CHECKPOINT_DIR = "../checkpoints"
-
-
-def resolve_device(device: str) -> str:
-    if device.startswith("cuda") and not torch.cuda.is_available():
-        Logger("CUDA 不可用，已回退到 CPU")
-        return "cpu"
-    if device == "cuda" and torch.cuda.is_available():
-        return "cuda:0"
-    return device
 
 
 def train_epoch(epoch, loader, iters, lora_params, start_step=0, wandb=None):
@@ -82,24 +73,9 @@ def train_epoch(epoch, loader, iters, lora_params, start_step=0, wandb=None):
                     }
                 )
 
-        if step % args.save_interval == 0 or step == iters:
-            model.eval()
-            moe_suffix = "_moe" if lm_config.use_moe else ""
-            # 保存 LoRA 权重
-            lora_save_path = f"{args.save_dir}/{args.lora_name}_{lm_config.hidden_size}{moe_suffix}.pth"
-            save_lora(model, lora_save_path)
-            lm_checkpoint(
-                lm_config,
-                weight=args.lora_name,
-                model=model,
-                optimizer=optimizer,
-                scaler=scaler,
-                epoch=epoch,
-                step=step,
-                wandb=wandb,
-                save_dir=CHECKPOINT_DIR,
-            )
-            model.train()
+        if step % args.save_interval == 0 and step != iters:
+            save_checkpoint(lm_config, args.lora_name, model, optimizer, scaler, epoch, step, wandb=wandb, save_dir=args.save_dir,
+                checkpoint_dir=CHECKPOINT_DIR, save_model_fn=save_lora)
 
         del input_ids, labels, res, loss
 
@@ -109,6 +85,9 @@ def train_epoch(epoch, loader, iters, lora_params, start_step=0, wandb=None):
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
+    if last_step > start_step:
+        save_checkpoint(lm_config, args.lora_name, model, optimizer, scaler, epoch, last_step, wandb=wandb, save_dir=args.save_dir,
+                        checkpoint_dir=CHECKPOINT_DIR, save_model_fn=save_lora)
 
 
 if __name__ == "__main__":
@@ -118,7 +97,7 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=10, help="训练轮数")
     parser.add_argument("--batch_size", type=int, default=32, help="批大小")
     parser.add_argument("--learning_rate", type=float, default=1e-4, help="初始学习率")
-    parser.add_argument("--device", type=str, default="cuda:0" if torch.cuda.is_available() else "cpu", help="训练设备")
+    parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="训练设备")
     parser.add_argument("--dtype", type=str, default="bfloat16", help="混合精度类型")
     parser.add_argument("--num_workers", type=int, default=8, help="数据加载线程数")
     parser.add_argument("--accumulation_steps", type=int, default=1, help="梯度累积步数")
@@ -129,12 +108,7 @@ if __name__ == "__main__":
     parser.add_argument("--num_hidden_layers", default=8, type=int, help="隐藏层数量")
     parser.add_argument("--max_seq_len", default=340, type=int, help="训练截断长度")
     parser.add_argument("--use_moe", default=0, type=int, choices=[0, 1], help="是否使用 MoE 结构")
-    parser.add_argument(
-        "--data_path",
-        type=str,
-        default="../dataset/data/lora_medical.jsonl",
-        help="LoRA 训练数据路径",
-    )
+    parser.add_argument("--data_path", type=str, default="../dataset/data/lora_medical.jsonl", help="LoRA 训练数据路径")
     parser.add_argument("--from_weight", default="full_sft", type=str, help="基座权重名称")
     parser.add_argument("--from_resume", default=0, type=int, choices=[0, 1], help="是否自动续训")
     parser.add_argument("--use_wandb", action="store_true", help="是否启用实验日志平台")
@@ -143,7 +117,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # ========== 1. 初始化环境和随机种子 ==========
-    args.device = resolve_device(args.device)
+    if args.device.startswith("cuda") and not torch.cuda.is_available():
+        Logger("CUDA 不可用，已回退到 CPU")
+        args.device = "cpu"
     setup_seed(42)
     os.makedirs(args.save_dir, exist_ok=True)
 

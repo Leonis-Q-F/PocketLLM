@@ -104,6 +104,40 @@ def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoc
         return None
 
 
+def save_checkpoint(lm_config, weight, model, optimizer, scaler, epoch, step, wandb=None,
+                    save_dir='../out', checkpoint_dir='../checkpoints', save_model_fn=None):
+    os.makedirs(save_dir, exist_ok=True)
+    moe_path = '_moe' if lm_config.use_moe else ''
+    weight_path = f'{save_dir}/{weight}_{lm_config.hidden_size}{moe_path}.pth'
+    was_training = model.training
+    model.eval()
+    try:
+        if save_model_fn is not None:
+            save_model_fn(model, weight_path)
+        else:
+            raw_model = getattr(model, 'module', model)
+            raw_model = getattr(raw_model, '_orig_mod', raw_model)
+            state_dict = raw_model.state_dict()
+            tmp_path = weight_path + '.tmp'
+            torch.save({k: v.half().cpu() for k, v in state_dict.items()}, tmp_path)
+            os.replace(tmp_path, weight_path)
+            del state_dict
+        lm_checkpoint(
+            lm_config,
+            weight=weight,
+            model=model,
+            optimizer=optimizer,
+            scaler=scaler,
+            epoch=epoch,
+            step=step,
+            wandb=wandb,
+            save_dir=checkpoint_dir,
+        )
+    finally:
+        if was_training:
+            model.train()
+
+
 def init_model(lm_config, from_weight='pretrain', tokenizer_path='../model', save_dir='../out', device='cuda'):
     tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
     model = PocketLLMForCausalLM(lm_config)
