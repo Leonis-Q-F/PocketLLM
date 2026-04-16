@@ -7,7 +7,4 @@ __pycache__/
 .mypy_cache/
 out/
 checkpoints/
-data/
-!dataset/data/
-dataset/data/*
-!dataset/data/README.md
+dataset/data

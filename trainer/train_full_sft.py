@@ -14,9 +14,20 @@ from torch import optim
 from torch.utils.data import DataLoader
 from model.model_pocketllm import PocketLLMConfig
 from dataset.dataloader import SFTDataset
-from trainer.trainer_utils import get_lr, Logger, lm_checkpoint, setup_seed, init_model, SkipBatchSampler, save_checkpoint
+from trainer.trainer_utils import get_lr, Logger, lm_checkpoint, setup_seed, init_model, SkipBatchSampler
 
 warnings.filterwarnings('ignore')
+
+
+def save_sft_checkpoint(epoch, step, wandb=None):
+    model.eval()
+    moe_suffix = '_moe' if lm_config.use_moe else ''
+    ckp = f'{args.save_dir}/{args.save_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
+    raw_model = getattr(model, '_orig_mod', model)
+    torch.save({k: v.half().cpu() for k, v in raw_model.state_dict().items()}, ckp)
+    lm_checkpoint(lm_config, weight=args.save_weight, model=model, optimizer=optimizer, scaler=scaler,
+                  epoch=epoch, step=step, wandb=wandb, save_dir='../checkpoints')
+    model.train()
 
 
 def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
@@ -66,8 +77,7 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
 
         # 模型保存
         if step % args.save_interval == 0 and step != iters:
-            save_checkpoint(lm_config, args.save_weight, model, optimizer, scaler, epoch, step,
-                            wandb=wandb, save_dir=args.save_dir, checkpoint_dir='../checkpoints')
+            save_sft_checkpoint(epoch, step, wandb)
 
         del input_ids, labels, res, loss
 
@@ -79,8 +89,7 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
     if last_step > start_step:
-        save_checkpoint(lm_config, args.save_weight, model, optimizer, scaler, epoch, last_step,
-                        wandb=wandb, save_dir=args.save_dir, checkpoint_dir='../checkpoints')
+        save_sft_checkpoint(epoch, last_step, wandb)
 
 
 if __name__ == "__main__":

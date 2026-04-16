@@ -16,11 +16,21 @@ from torch.utils.data import DataLoader
 from dataset.dataloader import SFTDataset
 from model.model_lora import apply_lora, save_lora
 from model.model_pocketllm import PocketLLMConfig
-from trainer.trainer_utils import Logger, SkipBatchSampler, get_lr, init_model, lm_checkpoint, save_checkpoint, setup_seed
+from trainer.trainer_utils import Logger, SkipBatchSampler, get_lr, init_model, lm_checkpoint, setup_seed
 
 warnings.filterwarnings("ignore")
 
 CHECKPOINT_DIR = "../checkpoints"
+
+
+def save_lora_checkpoint(epoch, step, wandb=None):
+    model.eval()
+    moe_suffix = "_moe" if lm_config.use_moe else ""
+    lora_save_path = f"{args.save_dir}/{args.lora_name}_{lm_config.hidden_size}{moe_suffix}.pth"
+    save_lora(model, lora_save_path)
+    lm_checkpoint(lm_config, weight=args.lora_name, model=model, optimizer=optimizer, scaler=scaler,
+                  epoch=epoch, step=step, wandb=wandb, save_dir=CHECKPOINT_DIR)
+    model.train()
 
 
 def train_epoch(epoch, loader, iters, lora_params, start_step=0, wandb=None):
@@ -74,8 +84,7 @@ def train_epoch(epoch, loader, iters, lora_params, start_step=0, wandb=None):
                 )
 
         if step % args.save_interval == 0 and step != iters:
-            save_checkpoint(lm_config, args.lora_name, model, optimizer, scaler, epoch, step, wandb=wandb, save_dir=args.save_dir,
-                checkpoint_dir=CHECKPOINT_DIR, save_model_fn=save_lora)
+            save_lora_checkpoint(epoch, step, wandb)
 
         del input_ids, labels, res, loss
 
@@ -86,8 +95,7 @@ def train_epoch(epoch, loader, iters, lora_params, start_step=0, wandb=None):
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
     if last_step > start_step:
-        save_checkpoint(lm_config, args.lora_name, model, optimizer, scaler, epoch, last_step, wandb=wandb, save_dir=args.save_dir,
-                        checkpoint_dir=CHECKPOINT_DIR, save_model_fn=save_lora)
+        save_lora_checkpoint(epoch, last_step, wandb)
 
 
 if __name__ == "__main__":

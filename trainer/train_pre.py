@@ -14,9 +14,20 @@ from torch import optim
 from torch.utils.data import DataLoader
 from model.model_pocketllm import PocketLLMConfig
 from dataset.dataloader import PretrainDataset
-from trainer.trainer_utils import get_lr, Logger, lm_checkpoint, setup_seed, init_model, SkipBatchSampler, save_checkpoint
+from trainer.trainer_utils import get_lr, Logger, lm_checkpoint, setup_seed, init_model, SkipBatchSampler
 
 warnings.filterwarnings('ignore')
+
+
+def save_pretrain_checkpoint(epoch, step, wandb=None):
+    model.eval()
+    moe_suffix = '_moe' if lm_config.use_moe else ''
+    ckp = f'{args.save_dir}/{args.save_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
+    raw_model = getattr(model, '_orig_mod', model)
+    torch.save({k: v.half().cpu() for k, v in raw_model.state_dict().items()}, ckp)
+    lm_checkpoint(lm_config, weight=args.save_weight, model=model, optimizer=optimizer, scaler=scaler,
+                  epoch=epoch, step=step, wandb=wandb, save_dir='../checkpoints')
+    model.train()
 
 
 def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
@@ -64,8 +75,7 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
         
         # 模型保存
         if step % args.save_interval == 0 and step != iters:
-            save_checkpoint(lm_config, args.save_weight, model, optimizer, scaler, epoch, step,
-                            wandb=wandb, save_dir=args.save_dir, checkpoint_dir='../checkpoints')
+            save_pretrain_checkpoint(epoch, step, wandb)
 
         del input_ids, labels, res, loss 
 
@@ -77,8 +87,7 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
     if last_step > start_step:
-        save_checkpoint(lm_config, args.save_weight, model, optimizer, scaler, epoch, last_step,
-                        wandb=wandb, save_dir=args.save_dir, checkpoint_dir='../checkpoints')
+        save_pretrain_checkpoint(epoch, last_step, wandb)
 
 
 if __name__ == "__main__":
@@ -98,7 +107,7 @@ if __name__ == "__main__":
     parser.add_argument('--hidden_size', default=768, type=int, help="隐藏层维度")
     parser.add_argument('--num_hidden_layers', default=8, type=int, help="隐藏层数量")
     parser.add_argument('--max_seq_len', default=340, type=int, help="训练的最大截断长度（中文1token≈1.5~1.7字符）")
-    parser.add_argument('--use_moe', default=0, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
+    parser.add_argument('--use_moe', default=1, type=int, choices=[0, 1], help="是否使用MoE架构（0=否，1=是）")
     parser.add_argument("--data_path", type=str, default="../dataset/data/pretrain_t2t_mini.jsonl", help="预训练数据路径")
     parser.add_argument('--from_weight', default='none', type=str, help="基于哪个权重训练，为none则从头开始")
     parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否自动检测&续训（0=否，1=是）")
