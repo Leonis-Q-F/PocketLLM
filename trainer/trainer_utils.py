@@ -43,7 +43,7 @@ def setup_seed(seed: int):
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
-def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoch=0, step=0, wandb=None, save_dir='../checkpoints', **kwargs
+def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoch=0, step=0, swanlab=None, save_dir='../checkpoints', **kwargs
 ):
     os.makedirs(save_dir, exist_ok=True)
     moe_path = '_moe' if lm_config.use_moe else ''
@@ -63,13 +63,13 @@ def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoc
         os.replace(ckp_tmp, ckp_path)
 
         # 记录实验平台 run id，便于断点续训时恢复日志
-        wandb_id = None
-        if wandb:
-            if hasattr(wandb, 'get_run'):
-                run = wandb.get_run()
-                wandb_id = getattr(run, 'id', None) if run else None
+        swanlab_id = None
+        if swanlab:
+            if hasattr(swanlab, 'get_run'):
+                run = swanlab.get_run()
+                swanlab_id = getattr(run, 'id', None) if run else None
             else:
-                wandb_id = getattr(wandb, 'id', None)
+                swanlab_id = getattr(swanlab, 'id', None)
 
         # 保存训练恢复所需状态
         resume_data = {
@@ -77,7 +77,7 @@ def lm_checkpoint(lm_config, weight='full_sft', model=None, optimizer=None, epoc
             'optimizer': optimizer.state_dict() if optimizer is not None else None,
             'epoch': epoch,
             'step': step,
-            'wandb_id': wandb_id
+            'swanlab_id': swanlab_id
         }
 
         # 额外状态，例如 scaler

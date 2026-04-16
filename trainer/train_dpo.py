@@ -21,29 +21,32 @@ from trainer.trainer_utils import get_lr, Logger, lm_checkpoint, setup_seed, ini
 warnings.filterwarnings('ignore')
 
 
+# DPO核心：计算策略模型和参考模型的log概率差异，并基于beta参数计算损失
 def logits_to_log_probs(logits, labels):
-    log_probs = F.log_softmax(logits, dim=2)
-    return torch.gather(log_probs, dim=2, index=labels.unsqueeze(2)).squeeze(-1)
+    log_probs = F.log_softmax(logits, dim=2) 
+    return torch.gather(log_probs, dim=2, index=labels.unsqueeze(2)).squeeze(-1) # 从logits转换为对应标签的log概率
 
 
+# DPO损失计算：根据参考模型和策略模型的log概率差异，计算DPO损失
 def dpo_loss(ref_log_probs, policy_log_probs, mask, beta):
     ref_log_probs = (ref_log_probs * mask).sum(dim=1)
-    policy_log_probs = (policy_log_probs * mask).sum(dim=1)
+    policy_log_probs = (policy_log_probs * mask).sum(dim=1) 
 
+    # 将前半部分视为chosen，后半部分视为rejected
     batch_size = ref_log_probs.shape[0]
     chosen_ref_log_probs = ref_log_probs[:batch_size // 2]
     reject_ref_log_probs = ref_log_probs[batch_size // 2:]
     chosen_policy_log_probs = policy_log_probs[:batch_size // 2]
     reject_policy_log_probs = policy_log_probs[batch_size // 2:]
 
-    pi_logratios = chosen_policy_log_probs - reject_policy_log_probs
-    ref_logratios = chosen_ref_log_probs - reject_ref_log_probs
-    logits = pi_logratios - ref_logratios
-    loss = -F.logsigmoid(beta * logits)
+    pi_logratios = chosen_policy_log_probs - reject_policy_log_probs # 策略模型的log概率差异
+    ref_logratios = chosen_ref_log_probs - reject_ref_log_probs # 参考模型的log概率差异
+    logits = pi_logratios - ref_logratios # 策略模型和参考模型的log概率差异
+    loss = -F.logsigmoid(beta * logits) # DPO损失计算公式，鼓励策略模型在chosen上比reject更优于参考模型
     return loss.mean()
 
 
-def save_dpo_checkpoint(epoch, step, wandb=None):
+def save_dpo_checkpoint(epoch, step, swanlab=None):
     model.eval()
     moe_suffix = '_moe' if lm_config.use_moe else ''
     ckp = f'{args.save_dir}/{args.save_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
@@ -57,13 +60,13 @@ def save_dpo_checkpoint(epoch, step, wandb=None):
         scaler=scaler,
         epoch=epoch,
         step=step,
-        wandb=wandb,
+        swanlab=swanlab,
         save_dir='../checkpoints',
     )
     model.train()
 
 
-def train_epoch(epoch, loader, iters, ref_model, start_step=0, wandb=None):
+def train_epoch(epoch, loader, iters, ref_model, start_step=0, swanlab=None):
     start_time = time.time()
     last_step = start_step
 
@@ -79,17 +82,21 @@ def train_epoch(epoch, loader, iters, ref_model, start_step=0, wandb=None):
         y = torch.cat([y_chosen, y_rejected], dim=0)
         mask = torch.cat([mask_chosen, mask_rejected], dim=0)
 
+        # 动态学习率调整
         lr = get_lr(epoch * iters + step, args.epochs * iters, args.learning_rate)
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
 
+        # 混合精度前向传播和DPO损失计算
         with autocast_ctx:
+            # 参考模型前向传播，计算log概率
             with torch.no_grad():
                 ref_outputs = ref_model(x)
                 ref_logits = ref_outputs.logits
             ref_log_probs = logits_to_log_probs(ref_logits, y)
 
-            outputs = model(x)
+            # 策略模型前向传播
+            outputs = model(x) 
             logits = outputs.logits
             policy_log_probs = logits_to_log_probs(logits, y)
 
@@ -118,8 +125,8 @@ def train_epoch(epoch, loader, iters, ref_model, start_step=0, wandb=None):
                 f'loss: {current_loss:.4f}, dpo_loss: {current_dpo_loss:.4f}, '
                 f'aux_loss: {current_aux_loss:.4f}, lr: {current_lr:.8f}, epoch_time: {eta_min:.1f}min'
             )
-            if wandb:
-                wandb.log(
+            if swanlab:
+                swanlab.log(
                     {
                         "loss": current_loss,
                         "dpo_loss": current_dpo_loss,
@@ -130,7 +137,7 @@ def train_epoch(epoch, loader, iters, ref_model, start_step=0, wandb=None):
                 )
 
         if step % args.save_interval == 0 and step != iters:
-            save_dpo_checkpoint(epoch, step, wandb)
+            save_dpo_checkpoint(epoch, step, swanlab)
 
         del x_chosen, x_rejected, y_chosen, y_rejected, mask_chosen, mask_rejected, x, y, mask
         del ref_outputs, ref_logits, ref_log_probs, outputs, logits, policy_log_probs, dpo_loss_val, loss
@@ -142,7 +149,7 @@ def train_epoch(epoch, loader, iters, ref_model, start_step=0, wandb=None):
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
     if last_step > start_step:
-        save_dpo_checkpoint(epoch, last_step, wandb)
+        save_dpo_checkpoint(epoch, last_step, swanlab)
 
 
 if __name__ == "__main__":
@@ -167,8 +174,8 @@ if __name__ == "__main__":
     parser.add_argument('--from_weight', default='full_sft', type=str, help="基于哪个权重训练")
     parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否自动检测&续训（0=否，1=是）")
     parser.add_argument('--beta', default=0.15, type=float, help="DPO中的beta参数")
-    parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
-    parser.add_argument("--wandb_project", type=str, default="PocketLLM-DPO", help="wandb项目名")
+    parser.add_argument("--use_swanlab", action="store_true", help="是否使用swanlab")
+    parser.add_argument("--swanlab_project", type=str, default="PocketLLM-DPO", help="swanlab项目名")
     parser.add_argument("--use_compile", default=0, type=int, choices=[0, 1], help="是否使用torch.compile加速（0=否，1=是）")
     args = parser.parse_args()
 
@@ -192,18 +199,18 @@ if __name__ == "__main__":
     dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
     autocast_ctx = nullcontext() if device_type == "cpu" else torch.amp.autocast(device_type, dtype=dtype)
 
-    # ========== 4. 配wandb ==========
-    wandb = None
-    if args.use_wandb:
-        import swanlab as wandb
+    # ========== 4. 配swanlab ==========
+    swanlab = None
+    if args.use_swanlab:
+        import swanlab
 
-        wandb_id = ckp_data.get('wandb_id') if ckp_data else None
-        resume = 'must' if wandb_id else None
-        wandb_run_name = f"PocketLLM-DPO-Epoch-{args.epochs}-BatchSize-{args.batch_size}-LearningRate-{args.learning_rate}"
-        wandb.init(
-            project=args.wandb_project,
-            name=wandb_run_name,
-            id=wandb_id,
+        swanlab_id = ckp_data.get('swanlab_id') if ckp_data else None
+        resume = 'must' if swanlab_id else None
+        swanlab_run_name = f"PocketLLM-DPO-Epoch-{args.epochs}-BatchSize-{args.batch_size}-LearningRate-{args.learning_rate}"
+        swanlab.init(
+            project=args.swanlab_project,
+            name=swanlab_run_name,
+            id=swanlab_id,
             resume=resume
         )
 
@@ -247,6 +254,6 @@ if __name__ == "__main__":
 
         if skip > 0:
             Logger(f'Epoch [{epoch + 1}/{args.epochs}]: 跳过前{start_step}个step，从step {start_step + 1}开始')
-            train_epoch(epoch, loader, len(loader) + skip, ref_model, start_step, wandb)
+            train_epoch(epoch, loader, len(loader) + skip, ref_model, start_step, swanlab)
         else:
-            train_epoch(epoch, loader, len(loader), ref_model, 0, wandb)
+            train_epoch(epoch, loader, len(loader), ref_model, 0, swanlab)

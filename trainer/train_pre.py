@@ -19,18 +19,18 @@ from trainer.trainer_utils import get_lr, Logger, lm_checkpoint, setup_seed, ini
 warnings.filterwarnings('ignore')
 
 
-def save_pretrain_checkpoint(epoch, step, wandb=None):
+def save_pretrain_checkpoint(epoch, step, swanlab=None):
     model.eval()
     moe_suffix = '_moe' if lm_config.use_moe else ''
     ckp = f'{args.save_dir}/{args.save_weight}_{lm_config.hidden_size}{moe_suffix}.pth'
     raw_model = getattr(model, '_orig_mod', model)
     torch.save({k: v.half().cpu() for k, v in raw_model.state_dict().items()}, ckp)
     lm_checkpoint(lm_config, weight=args.save_weight, model=model, optimizer=optimizer, scaler=scaler,
-                  epoch=epoch, step=step, wandb=wandb, save_dir='../checkpoints')
+                  epoch=epoch, step=step, swanlab=swanlab, save_dir='../checkpoints')
     model.train()
 
 
-def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
+def train_epoch(epoch, loader, iters, start_step=0, swanlab=None):
     start_time = time.time()
     last_step = start_step
     for step,(input_ids, labels) in enumerate(loader, start = start_step + 1):
@@ -71,11 +71,11 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
             current_lr = optimizer.param_groups[-1]['lr']
             eta_min = spend_time / max(step - start_step, 1) * (iters - step) // 60
             Logger(f'Epoch:[{epoch + 1}/{args.epochs}]({step}/{iters}), loss: {current_loss:.4f}, logits_loss: {current_logits_loss:.4f}, aux_loss: {current_aux_loss:.4f}, lr: {current_lr:.8f}, epoch_time: {eta_min:.1f}min')
-            if wandb: wandb.log({"loss": current_loss, "logits_loss": current_logits_loss, "aux_loss": current_aux_loss, "learning_rate": current_lr, "epoch_time": eta_min})
+            if swanlab: swanlab.log({"loss": current_loss, "logits_loss": current_logits_loss, "aux_loss": current_aux_loss, "learning_rate": current_lr, "epoch_time": eta_min})
         
         # 模型保存
         if step % args.save_interval == 0 and step != iters:
-            save_pretrain_checkpoint(epoch, step, wandb)
+            save_pretrain_checkpoint(epoch, step, swanlab)
 
         del input_ids, labels, res, loss 
 
@@ -87,7 +87,7 @@ def train_epoch(epoch, loader, iters, start_step=0, wandb=None):
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
     if last_step > start_step:
-        save_pretrain_checkpoint(epoch, last_step, wandb)
+        save_pretrain_checkpoint(epoch, last_step, swanlab)
 
 
 if __name__ == "__main__":
@@ -111,8 +111,8 @@ if __name__ == "__main__":
     parser.add_argument("--data_path", type=str, default="../dataset/data/pretrain_t2t_mini.jsonl", help="预训练数据路径")
     parser.add_argument('--from_weight', default='none', type=str, help="基于哪个权重训练，为none则从头开始")
     parser.add_argument('--from_resume', default=0, type=int, choices=[0, 1], help="是否自动检测&续训（0=否，1=是）")
-    parser.add_argument("--use_wandb", action="store_true", help="是否使用wandb")
-    parser.add_argument("--wandb_project", type=str, default="PocketLLM-Pretrain", help="wandb项目名")
+    parser.add_argument("--use_swanlab", action="store_true", help="是否使用swanlab")
+    parser.add_argument("--swanlab_project", type=str, default="PocketLLM-Pretrain", help="swanlab项目名")
     parser.add_argument("--use_compile", default=0, type=int, choices=[0, 1], help="是否使用torch.compile加速（0=否，1=是）")
     args = parser.parse_args()
         
@@ -133,18 +133,18 @@ if __name__ == "__main__":
     dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
     autocast_ctx = nullcontext() if device_type == "cpu" else torch.amp.autocast(device_type, dtype=dtype)
     
-    # ========== 4. 配wandb ==========
-    wandb = None
-    if args.use_wandb:
-        import swanlab as wandb
+    # ========== 4. 配swanlab ==========
+    swanlab = None
+    if args.use_swanlab:
+        import swanlab
 
-        wandb_id = ckp_data.get('wandb_id') if ckp_data else None
-        resume = 'must' if wandb_id else None
-        wandb_run_name = f"PocketLLM-Pretrain-Epoch-{args.epochs}-BatchSize-{args.batch_size}-LearningRate-{args.learning_rate}"
-        wandb.init(
-            project=args.wandb_project,
-            name=wandb_run_name,
-            id=wandb_id,
+        swanlab_id = ckp_data.get('swanlab_id') if ckp_data else None
+        resume = 'must' if swanlab_id else None
+        swanlab_run_name = f"PocketLLM-Pretrain-Epoch-{args.epochs}-BatchSize-{args.batch_size}-LearningRate-{args.learning_rate}"
+        swanlab.init(
+            project=args.swanlab_project,
+            name=swanlab_run_name,
+            id=swanlab_id,
             resume=resume
         )
     
@@ -189,7 +189,7 @@ if __name__ == "__main__":
 
         if skip > 0:
             Logger(f'Epoch [{epoch + 1}/{args.epochs}]: 跳过前{start_step}个step，从step {start_step + 1}开始')
-            train_epoch(epoch, loader, len(loader) + skip, start_step, wandb)
+            train_epoch(epoch, loader, len(loader) + skip, start_step, swanlab)
         else:
-            train_epoch(epoch, loader, len(loader), 0, wandb)
+            train_epoch(epoch, loader, len(loader), 0, swanlab)
 

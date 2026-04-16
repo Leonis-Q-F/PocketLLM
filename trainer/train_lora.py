@@ -23,17 +23,17 @@ warnings.filterwarnings("ignore")
 CHECKPOINT_DIR = "../checkpoints"
 
 
-def save_lora_checkpoint(epoch, step, wandb=None):
+def save_lora_checkpoint(epoch, step, swanlab=None):
     model.eval()
     moe_suffix = "_moe" if lm_config.use_moe else ""
     lora_save_path = f"{args.save_dir}/{args.lora_name}_{lm_config.hidden_size}{moe_suffix}.pth"
     save_lora(model, lora_save_path)
     lm_checkpoint(lm_config, weight=args.lora_name, model=model, optimizer=optimizer, scaler=scaler,
-                  epoch=epoch, step=step, wandb=wandb, save_dir=CHECKPOINT_DIR)
+                  epoch=epoch, step=step, swanlab=swanlab, save_dir=CHECKPOINT_DIR)
     model.train()
 
 
-def train_epoch(epoch, loader, iters, lora_params, start_step=0, wandb=None):
+def train_epoch(epoch, loader, iters, lora_params, start_step=0, swanlab=None):
     start_time = time.time()
     last_step = start_step
 
@@ -72,8 +72,8 @@ def train_epoch(epoch, loader, iters, lora_params, start_step=0, wandb=None):
                 f"loss: {current_loss:.4f}, logits_loss: {current_logits_loss:.4f}, "
                 f"aux_loss: {current_aux_loss:.4f}, lr: {current_lr:.8f}, epoch_time: {eta_min:.1f}min"
             )
-            if wandb:
-                wandb.log(
+            if swanlab:
+                swanlab.log(
                     {
                         "loss": current_loss,
                         "logits_loss": current_logits_loss,
@@ -84,7 +84,7 @@ def train_epoch(epoch, loader, iters, lora_params, start_step=0, wandb=None):
                 )
 
         if step % args.save_interval == 0 and step != iters:
-            save_lora_checkpoint(epoch, step, wandb)
+            save_lora_checkpoint(epoch, step, swanlab)
 
         del input_ids, labels, res, loss
 
@@ -95,7 +95,7 @@ def train_epoch(epoch, loader, iters, lora_params, start_step=0, wandb=None):
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
     if last_step > start_step:
-        save_lora_checkpoint(epoch, last_step, wandb)
+        save_lora_checkpoint(epoch, last_step, swanlab)
 
 
 if __name__ == "__main__":
@@ -119,8 +119,8 @@ if __name__ == "__main__":
     parser.add_argument("--data_path", type=str, default="../dataset/data/lora_medical.jsonl", help="LoRA 训练数据路径")
     parser.add_argument("--from_weight", default="full_sft", type=str, help="基座权重名称")
     parser.add_argument("--from_resume", default=0, type=int, choices=[0, 1], help="是否自动续训")
-    parser.add_argument("--use_wandb", action="store_true", help="是否启用实验日志平台")
-    parser.add_argument("--wandb_project", type=str, default="PocketLLM-LoRA", help="实验项目名称")
+    parser.add_argument("--use_swanlab", action="store_true", help="是否启用swanlab实验日志平台")
+    parser.add_argument("--swanlab_project", type=str, default="PocketLLM-LoRA", help="swanlab项目名称")
     parser.add_argument("--use_compile", default=0, type=int, choices=[0, 1], help="是否启用 torch.compile")
     args = parser.parse_args()
 
@@ -145,19 +145,19 @@ if __name__ == "__main__":
     autocast_ctx = nullcontext() if device_type == "cpu" else torch.amp.autocast(device_type=device_type, dtype=amp_dtype)
 
     # ========== 4. 配置实验日志平台 ==========
-    wandb = None
-    if args.use_wandb:
-        import swanlab as wandb
+    swanlab = None
+    if args.use_swanlab:
+        import swanlab
 
-        wandb_id = ckp_data.get("wandb_id") if ckp_data else None
-        resume = "must" if wandb_id else None
-        wandb_run_name = (
+        swanlab_id = ckp_data.get("swanlab_id") if ckp_data else None
+        resume = "must" if swanlab_id else None
+        swanlab_run_name = (
             f"PocketLLM-LoRA-Epoch-{args.epochs}-BatchSize-{args.batch_size}-LearningRate-{args.learning_rate}"
         )
-        wandb.init(
-            project=args.wandb_project,
-            name=wandb_run_name,
-            id=wandb_id,
+        swanlab.init(
+            project=args.swanlab_project,
+            name=swanlab_run_name,
+            id=swanlab_id,
             resume=resume,
         )
 
@@ -211,6 +211,6 @@ if __name__ == "__main__":
 
         if skip > 0:
             Logger(f"Epoch [{epoch + 1}/{args.epochs}]：跳过前 {start_step} 个 step，从 step {start_step + 1} 开始")
-            train_epoch(epoch, loader, len(loader) + skip, lora_params, start_step, wandb)
+            train_epoch(epoch, loader, len(loader) + skip, lora_params, start_step, swanlab)
         else:
-            train_epoch(epoch, loader, len(loader), lora_params, 0, wandb)
+            train_epoch(epoch, loader, len(loader), lora_params, 0, swanlab)
