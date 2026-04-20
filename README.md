@@ -1,73 +1,29 @@
 # PocketLLM
 
-PocketLLM 是一个面向单卡实验的轻量级大语言模型训练仓库，目标是在尽量少的工程噪音下，把模型主干、数据适配层和训练入口组织成一条可读、可维护、可扩展的链路。
+> 一个面向单卡实验的轻量级 LLM 训练仓库，聚焦于清晰、直接、可裁剪的训练链路。
 
-当前仓库的第一优先级是提供一条可理解、可裁剪的单卡训练链路。模型主干、LoRA 工具和多种数据集适配器已经在仓库中，正式训练入口覆盖预训练、全量 SFT、LoRA、DPO 和 GRPO。
+PocketLLM 用尽可能少的代码骨架，把 decoder-only 大语言模型从预训练一路串到 SFT、LoRA、DPO 和 GRPO。  
+它适合作为本地实验、代码阅读和训练流程裁剪的起点。
 
-## 当前状态
+## 项目内容
 
-- 当前状态：活跃原型
-- 已提供：模型定义、LoRA 工具、数据集适配器、单卡预训练入口、全量 SFT 入口、LoRA 入口、DPO 入口、GRPO 入口、推理脚本、模型导出脚本
-- 尚未提供：持续集成流程
-- 适合场景：本地实验、代码阅读、最小可复现训练链路
-- 不适合场景：生产训练平台、多人协作的大规模训练工程、公开基准提交
+- 一个 decoder-only causal language model 主干
+- GQA、RoPE、RMSNorm、SwiGLU，以及可选 MoE 前馈层
+- 预训练、全量 SFT、LoRA、DPO、GRPO 五个训练入口
+- 一套统一的数据适配器
+- 一份本地 tokenizer
+- 一个交互式推理脚本
+- 一个权重转换与 LoRA 合并脚本
 
-## 主要特性
+## 安装
 
-- 仅解码器因果语言模型
-- GQA 注意力、RoPE、RMSNorm、SwiGLU
-- 可选 MoE 前馈层与路由辅助损失
-- 本地 tokenizer 资源，位于 `model/`
-- `Pretrain / SFT / DPO / RLAIF` 数据适配器
-- LoRA 注入、保存、加载与合并工具
-- 预训练、全量 SFT、LoRA、DPO、GRPO 阶段的检查点保存与续训能力
-- 面向单卡的训练流程
+环境要求：
 
-## 仓库结构
+- Python 3.10+
+- PyTorch 2.2+
+- 一张可用的 CUDA 显卡更合适
 
-```text
-PocketLLM
-├── eval_llm.py
-├── README.md
-├── CLAUDE.md
-├── requirements.txt
-├── dataset
-│   ├── dataloader.py
-│   └── data
-│       ├── README.md
-│       ├── pretrain_t2t_mini.jsonl
-│       ├── pretrain_t2t.jsonl
-│       ├── sft_t2t_mini.jsonl
-│       ├── sft_t2t.jsonl
-│       ├── dpo.jsonl
-│       ├── rlaif.jsonl
-│       └── ...
-├── model
-│   ├── model_pocketllm.py
-│   ├── model_lora.py
-│   ├── tokenizer.json
-│   ├── tokenizer_config.json
-│   └── __init__.py
-├── scripts
-│   └── convert_model.py
-└── trainer
-    ├── train_dpo.py
-    ├── train_grpo.py
-    ├── train_full_sft.py
-    ├── train_lora.py
-    ├── train_pre.py
-    ├── rollout_engine.py
-    └── trainer_utils.py
-```
-
-## 环境要求
-
-- Python 3.10 及以上
-- 推荐使用支持 CUDA 的显卡，当前主要目标环境为单卡 `RTX 4070 Ti`
-- PyTorch 2.2 及以上
-- Windows 和 Linux 均可，但当前路径示例优先按照本仓库现状编写
-
-## 安装方式
+安装步骤：
 
 ```bash
 python -m venv .venv
@@ -85,20 +41,9 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-## 数据目录
+## 数据约定
 
-训练数据默认放在 `dataset/data/` 下，当前仓库已经包含本地数据文件。
-
-- `pretrain_t2t_mini.jsonl`：预训练冒烟测试首选
-- `pretrain_t2t.jsonl`：更大的预训练语料
-- `sft_t2t_mini.jsonl` / `sft_t2t.jsonl`：供未来监督微调阶段使用
-- `dpo.jsonl`：偏好学习数据
-- `rlaif.jsonl`：强化学习阶段的 prompt 数据
-- `agent_rl*.jsonl`：预留给后续 agentic RL 实验
-
-更详细的数据字段说明见 [dataset/data/README.md](dataset/data/README.md)。
-
-## 数据格式
+训练数据默认放在 `dataset/data/` 下，训练脚本按这个约定读取 JSONL 文件。
 
 ### 预训练
 
@@ -106,18 +51,18 @@ pip install -r requirements.txt
 {"text": "这是一个预训练样本。"}
 ```
 
-### 监督微调
+### SFT / LoRA
 
 ```jsonl
 {
   "conversations": [
     {"role": "user", "content": "你好"},
-    {"role": "assistant", "content": "你好，我是 PocketLLM。"}
+    {"role": "assistant", "content": "你好，欢迎使用 PocketLLM。"}
   ]
 }
 ```
 
-### 偏好学习
+### DPO
 
 ```jsonl
 {
@@ -132,13 +77,28 @@ pip install -r requirements.txt
 }
 ```
 
-### 强化学习
+### GRPO / RLAIF
 
-`RLAIFDataset` 当前按多轮对话提示词读取样本，通常要求最后一条 `assistant` 留空或可被视为采样位置。
+`RLAIFDataset` 读取多轮对话，并通过 tokenizer 的 chat template 生成 rollout prompt。通常会将最后一轮留给待生成的 `assistant`。
 
-## 快速开始
+## 最快跑通
 
-当前训练脚本对若干路径使用了相对当前工作目录的默认值，因此推荐从 `trainer/` 目录启动。
+如果只是先验证链路，可以先跑一遍最小预训练，再用推理脚本检查权重是否可用。
+
+### 1. 准备一份最小预训练数据
+
+```jsonl
+{"text": "PocketLLM 是一个用于实验的小型语言模型训练仓库。"}
+{"text": "这是一条用于冒烟测试的样本。"}
+```
+
+把它保存为：
+
+```text
+dataset/data/pretrain_t2t_mini.jsonl
+```
+
+### 2. 运行预训练
 
 ```bash
 cd trainer
@@ -153,7 +113,25 @@ python train_pre.py \
   --accumulation_steps 4
 ```
 
-如果要继续训练同一组权重，可以在同一工作目录下启用恢复模式：
+### 3. 回到仓库根目录做一次推理
+
+```bash
+cd ..
+python eval_llm.py \
+  --load_from model \
+  --save_dir out \
+  --weight pretrain_smoke \
+  --hidden_size 512 \
+  --num_hidden_layers 4
+```
+
+## 训练入口
+
+每个阶段都拆成了单独脚本，便于阅读、替换和定向修改。
+
+### 预训练
+
+入口文件：[trainer/train_pre.py](trainer/train_pre.py)
 
 ```bash
 cd trainer
@@ -161,10 +139,51 @@ python train_pre.py \
   --data_path ../dataset/data/pretrain_t2t_mini.jsonl \
   --save_dir ../out \
   --save_weight pretrain_smoke \
-  --from_resume 1
+  --hidden_size 512 \
+  --num_hidden_layers 4 \
+  --max_seq_len 256 \
+  --batch_size 4 \
+  --accumulation_steps 4
 ```
 
-如果要从 `full_sft` 权重继续做单卡 DPO，可以直接使用：
+### 全量 SFT
+
+入口文件：[trainer/train_full_sft.py](trainer/train_full_sft.py)
+
+```bash
+cd trainer
+python train_full_sft.py \
+  --data_path ../dataset/data/sft_t2t_mini.jsonl \
+  --save_dir ../out \
+  --save_weight full_sft_smoke \
+  --from_weight pretrain_smoke \
+  --hidden_size 512 \
+  --num_hidden_layers 4 \
+  --max_seq_len 512 \
+  --batch_size 4 \
+  --accumulation_steps 4
+```
+
+### LoRA
+
+入口文件：[trainer/train_lora.py](trainer/train_lora.py)
+
+```bash
+cd trainer
+python train_lora.py \
+  --data_path ../dataset/data/lora_medical.jsonl \
+  --save_dir ../out \
+  --lora_name lora_medical_smoke \
+  --from_weight full_sft_smoke \
+  --hidden_size 512 \
+  --num_hidden_layers 4 \
+  --max_seq_len 512 \
+  --batch_size 4
+```
+
+### DPO
+
+入口文件：[trainer/train_dpo.py](trainer/train_dpo.py)
 
 ```bash
 cd trainer
@@ -172,57 +191,88 @@ python train_dpo.py \
   --data_path ../dataset/data/dpo.jsonl \
   --save_dir ../out \
   --save_weight dpo_smoke \
-  --from_weight full_sft \
+  --from_weight full_sft_smoke \
   --hidden_size 512 \
   --num_hidden_layers 4 \
-  --max_seq_len 256 \
+  --max_seq_len 512 \
   --batch_size 2 \
   --accumulation_steps 4
 ```
 
-## 训练说明
+### GRPO
 
-- 预训练入口是 [trainer/train_pre.py](trainer/train_pre.py)。
-- 全量 SFT 入口是 [trainer/train_full_sft.py](trainer/train_full_sft.py)。
-- LoRA 微调入口是 [trainer/train_lora.py](trainer/train_lora.py)。
-- DPO 偏好优化入口是 [trainer/train_dpo.py](trainer/train_dpo.py)。
-- GRPO 强化学习入口是 [trainer/train_grpo.py](trainer/train_grpo.py)。
-- GRPO rollout 推理封装在 [trainer/rollout_engine.py](trainer/rollout_engine.py)，默认使用本地 PyTorch 生成，也保留 SGLang HTTP 推理入口。
-- `trainer_utils.init_model()` 默认从 `../model` 读取 tokenizer，因此文档中的命令统一假设从 `trainer/` 目录执行。
-- 训练脚本统一使用 `--use_swanlab` 与 `--swanlab_project`，相关依赖已写入 `requirements.txt`。
-- GRPO 默认从 `full_sft` 权重继续训练，需要可用的奖励模型路径；若仅调试链路，需要同时传入 `--reward_model_path none --allow_rule_reward_only`。
+入口文件：[trainer/train_grpo.py](trainer/train_grpo.py)
 
-## 推理与导出
+GRPO 这条链路会额外用到：
 
-- 推理脚本是 [eval_llm.py](eval_llm.py)。
-- 模型导出脚本是 [scripts/convert_model.py](scripts/convert_model.py)。
-- `eval_llm.py` 延续原版交互方式，支持加载原生 torch 权重、Transformers 格式权重以及可选 LoRA。
-- `scripts/convert_model.py` 保留原版导出逻辑，支持导出为 PocketLLM Transformers 格式、Qwen 兼容格式，以及 LoRA 合并与模板转换。
+- 奖励模型目录，通过 `--reward_model_path` 指定
+- SGLang 服务地址，通过 `--sglang_base_url` 指定
 
-## 设计原则
+对应的 rollout 封装在 [trainer/rollout_engine.py](trainer/rollout_engine.py)。
 
-- 先保证链路真实存在，再写文档，不预支未来功能。
-- 优先把单卡路径打通，再考虑更复杂的工程抽象。
-- 文档、依赖和脚本应在同一个提交中保持一致。
-- 对人可见的说明文本优先使用中文；变量名、函数名、模块名保持英文。
+```bash
+cd trainer
+python train_grpo.py \
+  --data_path ../dataset/data/rlaif.jsonl \
+  --save_dir ../out \
+  --save_weight grpo_smoke \
+  --from_weight full_sft_smoke \
+  --reward_model_path /path/to/reward-model \
+  --sglang_base_url http://localhost:8996 \
+  --sglang_model_path ../model \
+  --sglang_shared_path ./sglang_ckpt_grpo \
+  --hidden_size 512 \
+  --num_hidden_layers 4 \
+  --batch_size 1 \
+  --num_generations 4
+```
 
-## 路线图
+## 推理
 
-1. 增加最小冒烟测试与持续集成流程。
-2. 继续拆分训练 checkpoint 与推理权重导出职责。
+推理脚本是 [eval_llm.py](eval_llm.py)。
 
-## 贡献方式
+它支持两种加载方式：
 
-- 欢迎提交问题、文档修订、训练脚本修复和最小可验证的功能补丁。
-- 新增运行依赖时，请同步更新 `requirements.txt`。
-- 修改路径约定、训练入口或目录结构时，请同步更新 `README.md` 和 `CLAUDE.md`。
-- 请避免在文档中承诺仓库尚未交付的功能。
+- `--load_from model`：从仓库里的原生 torch 权重加载
+- `--load_from <transformers目录>`：从导出的 Transformers 权重加载
+
+如果你要叠加 LoRA，可以这样跑：
+
+```bash
+python eval_llm.py \
+  --load_from model \
+  --save_dir out \
+  --weight full_sft_smoke \
+  --lora_weight lora_medical_smoke \
+  --hidden_size 512 \
+  --num_hidden_layers 4
+```
+
+## 权重转换与 LoRA 合并
+
+脚本位置：[scripts/convert_model.py](scripts/convert_model.py)
+
+这个脚本包含几类常用转换：
+
+- 原生 torch 权重转 Transformers 格式
+- 原生 torch 权重转 PocketLLM Transformers 格式
+- Transformers 权重转回 torch 权重
+- 基座权重和 LoRA 权重合并
+- chat template 的 `jinja <-> json` 转换
+
+这个脚本当前是直接改文件底部参数再运行的风格：
+
+```bash
+python scripts/convert_model.py
+```
+
+## 使用说明
+
+- 训练脚本默认从 `trainer/` 目录启动
+- tokenizer 默认从 `../model` 读取
+- `--use_swanlab` 和 `--swanlab_project` 在训练脚本里是统一可用的
+- 续训时可以使用 `--from_resume 1`
 
 ## 致谢
 
-- 设计与数据组织参考了 [minimind](https://github.com/jingyaogong/minimind)。
-- `dataset/data/` 中的数据说明和元数据文件保留了上游数据分发痕迹，二次分发前请自行核查来源与许可。
-
-## 许可说明
-
-仓库当前没有单独的 `LICENSE` 文件。若要作为公开开源仓库长期维护，建议在对外分发前补齐明确许可协议。
+- 数据组织和部分工程思路参考了 [minimind](https://github.com/jingyaogong/minimind)
